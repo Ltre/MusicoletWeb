@@ -1,0 +1,169 @@
+
+问：
+	
+	现在写个musicolet nginx配置文件，不需要https，需要upstream到本地4001端口，对 媒体文件gif|jpg|jpeg|png|bmp|swf|flv|mp4|ico|wma|wmv|asf|mp3|mmf|zip|rar|jpg|gif|png|swf|flv|mp4|m4a|aac|flac等（有重复，懒得改了）缓存30天并且要防盗链（只能在miku.us/larele.com及子域名下使用），对js/css等前端页面资源缓存7天，关闭对前端页面资源/媒体文件的access_log。访问日志这样配置：/home/wwwlogs/musicolet.miku.us_nginx.log combined。虽然没有配置，但强制跳转到https
+	
+	
+
+
+答：
+
+
+
+
+
+可以。这里有个关键点：你要求“**Nginx 本身不配置 HTTPS，但 HTTP 强制跳 HTTPS**”，如果 HTTPS 是由 Cloudflare 在外层提供，而 Cloudflare 再以 HTTP 回源，就不能无脑把所有 origin HTTP 请求 301，否则容易形成重定向循环。
+
+因此下面按 **Cloudflare 前置 HTTPS、Nginx 本地只监听 HTTP** 来写：当 Cloudflare 告诉 Nginx 原始客户端已经是 HTTPS 时正常提供服务；真正的 HTTP 访问才跳转 HTTPS。
+
+```nginx
+upstream musicolet_backend {
+    server 127.0.0.1:4001;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    server_name musicolet.miku.us;
+
+    access_log /home/wwwlogs/musicolet.miku.us_nginx.log combined;
+
+    # ============================================================
+    # 强制 HTTPS
+    #
+    # Nginx 本身不配置 SSL，HTTPS 由 Cloudflare 等前置代理提供。
+    # Cloudflare HTTPS -> HTTP 回源时会携带 X-Forwarded-Proto: https，
+    # 此时不能再次重定向，否则可能形成循环。
+    # ============================================================
+    if ($http_x_forwarded_proto != "https") {
+        return 301 https://$host$request_uri;
+    }
+
+
+    # ============================================================
+    # 媒体文件
+    # 浏览器缓存 30 天
+    # 禁止站外盗链
+    # 关闭 access_log
+    # ============================================================
+    location ~* \.(gif|jpe?g|png|bmp|swf|flv|mp4|ico|wma|wmv|asf|mp3|mmf|zip|rar|m4a|aac|flac)$ {
+
+        # 只允许 miku.us / larele.com 及其子域名引用。
+        #
+        # 注意：
+        # 没有 Referer 的直接访问也会被判定为盗链。
+        valid_referers
+            miku.us
+            *.miku.us
+            larele.com
+            *.larele.com;
+
+        if ($invalid_referer) {
+            return 403;
+        }
+
+        expires 30d;
+
+        access_log off;
+        log_not_found off;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+
+        proxy_pass http://musicolet_backend;
+    }
+
+
+    # ============================================================
+    # 前端静态资源
+    # 浏览器缓存 7 天
+    # 关闭 access_log
+    # ============================================================
+    location ~* \.(js|css|map|woff|woff2|ttf|otf|eot|svg)$ {
+        expires 7d;
+
+        access_log off;
+        log_not_found off;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+
+        proxy_pass http://musicolet_backend;
+    }
+
+
+    # ============================================================
+    # 其它动态请求 / HTML 页面
+    # ============================================================
+    location / {
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+
+        proxy_pass http://musicolet_backend;
+    }
+}
+```
+
+有两点你需要注意。
+
+第一，当前防盗链是**严格模式**：
+
+```nginx
+valid_referers
+    miku.us
+    *.miku.us
+    larele.com
+    *.larele.com;
+```
+
+所以直接在浏览器地址栏打开：
+
+```text
+https://musicolet.miku.us/xxx.mp3
+```
+
+因为没有 `Referer`，也会返回 `403`。这严格符合你说的“只能在 miku.us / larele.com 及子域名下使用”。
+
+如果你希望“**允许用户直接打开媒体 URL，但禁止第三方网页嵌入**”，则改成：
+
+```nginx
+valid_referers
+    none
+    blocked
+    miku.us
+    *.miku.us
+    larele.com
+    *.larele.com;
+```
+
+第二，现在的：
+
+```nginx
+expires 30d;
+expires 7d;
+```
+
+是**客户端/browser/CDN 缓存控制**，不是让 Nginx 自己把 Go 返回的媒体文件缓存 30 天。如果你以后还希望：
+
+```text
+第一次：
+Nginx → Go → 获取 mp3
+
+之后 30 天：
+Nginx 直接从本地 proxy_cache 返回
+甚至不再请求 Go
+```
+
+那是另一套 `proxy_cache` 配置。你目前描述的需求我没有擅自加这一层。
