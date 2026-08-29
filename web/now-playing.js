@@ -1,0 +1,1 @@
+async function refresh(){try{let r=await fetch('/api/public/now-playing');let x=await r.json();document.querySelector('#pt').textContent=x.song?.title||'暂无播放';document.querySelector('#pa').textContent=x.song?.artist||'';document.querySelector('#pal').textContent=x.song?.album||''}catch{}}refresh();setInterval(refresh,10000);
