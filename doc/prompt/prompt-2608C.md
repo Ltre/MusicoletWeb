@@ -30,3 +30,6 @@
 	请你结合会话项目"Musicolet复刻"内的所有会话记录，并参照以上文档，完成初期开发计划的任务。
 	
 	启动脚本要参考 scripts/example 目录中的脚本（这两个example脚本时从FmlySys拷贝过来的，有go每次启动前重新编译的过程，还设置了一些按需的常量，在windows版中还有网络代理配置）编写，代码最终保存到 scripts 目录中我已创建好的两个空脚本文件。
+	
+	请在分支 dev-2609A-step1 开发，不要提交，不要暂存。
+	推理过程和开发日志保存到 doc/devlog/devlog-2609A-features.md。
