@@ -21,7 +21,7 @@
 	经历了以下讨论，并记录到文档，如下；
 
 		初步探讨系统基本形态						doc/prompt/first.md
-		开始提具体的需求，并反复确认是否理解 		doc/prompt/second.md
+		开始提具体的需求，并以grill-me反复确认 		doc/prompt/second.md
 		UI布局需求									doc/prompt/layout-prompt.md
 		Musicolet 镜像系统技术需求文档				doc/requestment.md
 		MusicoletWeb 初期开发计划					Initial Development Plans.md
