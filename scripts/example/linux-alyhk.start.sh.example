@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -u
+
+# FmlySys Linux launcher for the Alibaba Cloud Hong Kong server.
+# The .cmd suffix is kept to match the project's launcher naming convention;
+# this file is a Bash script and should be executed on Linux.
+
+EXIT_CODE=1
+
+# Listener settings: FMLYSYS_PORT is the single source of truth for the server port.
+export FMLYSYS_BIND_HOST="0.0.0.0"
+export FMLYSYS_PORT="4001"
+# Server deployments must not expose the local development login shortcut.
+export FMLYSYS_DEV_AUTH_ENABLED="0"
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+
+fail() {
+    local message="$1"
+    local code="${2:-1}"
+    echo >&2
+    echo "[FmlySys] $message" >&2
+    exit "$code"
+}
+
+[ -f "$REPO_ROOT/go.mod" ] || fail "Repository root could not be resolved from: $SCRIPT_DIR"
+cd "$REPO_ROOT" || fail "Failed to enter repository root: $REPO_ROOT"
+
+export FMLYSYS_DATA_DIR="$REPO_ROOT/data"
+export FMLYSYS_DEV_MEMBER="${FMLYSYS_DEV_MEMBER:-Dev Admin}"
+FMLYSYS_CONFIG_FILE="$FMLYSYS_DATA_DIR/config.env"
+FMLYSYS_ADMIN_CREDENTIALS="$FMLYSYS_DATA_DIR/admin-credentials.enc"
+
+mkdir -p "$FMLYSYS_DATA_DIR" || fail "Failed to create data directory: $FMLYSYS_DATA_DIR"
+if [ ! -f "$FMLYSYS_CONFIG_FILE" ]; then
+    cat > "$FMLYSYS_CONFIG_FILE" <<'CONFIGEOF'
+# FmlySys local config. Keep this file private; data/ is ignored by Git.
+FMLYSYS_ADMIN_USERNAME=admin
+# Set this only for first creation or password reset; clear it again after successful login.
+FMLYSYS_ADMIN_BOOTSTRAP_PASSWORD=
+FMLYSYS_WECHAT_APP_ID=
+FMLYSYS_WECHAT_APP_SECRET=
+FMLYSYS_MASTER_KEY=
+CONFIGEOF
+    chmod 600 "$FMLYSYS_CONFIG_FILE" 2>/dev/null || true
+    echo "[FmlySys] Created local config template: $FMLYSYS_CONFIG_FILE"
+fi
+
+command -v go >/dev/null 2>&1 || fail "Go was not found in PATH. Install Go and reopen the shell."
+
+echo "[FmlySys] Repository root: $REPO_ROOT"
+echo "[FmlySys] Bind host: $FMLYSYS_BIND_HOST"
+echo "[FmlySys] Port: $FMLYSYS_PORT"
+echo "[FmlySys] Listening on http://$FMLYSYS_BIND_HOST:$FMLYSYS_PORT/"
+echo "[FmlySys] Data directory: $FMLYSYS_DATA_DIR"
+echo "[FmlySys] Local config: $FMLYSYS_CONFIG_FILE"
+echo "[FmlySys] Admin credentials: $FMLYSYS_ADMIN_CREDENTIALS"
+echo "[FmlySys] WeChat callback path: /auth/wechat/callback (origin is derived from the login request)"
+echo "[FmlySys] Local dev login: $FMLYSYS_DEV_AUTH_ENABLED"
+echo
+
+echo "[FmlySys] Tidying Go module metadata..."
+go mod tidy || fail "go mod tidy failed. Check outbound network/DNS/proxy settings."
+
+echo "[FmlySys] Downloading Go module dependencies..."
+go mod download all || fail "Failed to download Go module dependencies. Check outbound network/DNS/proxy settings."
+
+echo "[FmlySys] Verifying Go module dependencies..."
+go mod verify || fail "Go module verification failed."
+
+echo "[FmlySys] Go module dependencies are ready."
+echo
+
+echo "[FmlySys] Starting FmlySys..."
+go run ./cmd/fmlysys
+EXIT_CODE=$?
+if [ "$EXIT_CODE" -ne 0 ]; then
+    fail "FmlySys exited with code $EXIT_CODE." "$EXIT_CODE"
+fi
+exit 0
