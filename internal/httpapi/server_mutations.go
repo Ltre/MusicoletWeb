@@ -26,10 +26,11 @@ func (s *Server) sourcePlay(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) queueAction(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Action, Path string
-		QueueID      int64
-		Position     int
-		Next         bool
+		Action, Path, Name string
+		QueueID            int64
+		Position           int
+		Next               bool
+		Order              []string
 	}
 	if readJSON(w, r, &in) != nil {
 		return
@@ -44,6 +45,20 @@ func (s *Server) queueAction(w http.ResponseWriter, r *http.Request) {
 		e = s.App.QueueMove(r.Context(), in.QueueID, in.Path, in.Position)
 	case "delete":
 		e = s.App.DeleteQueue(r.Context(), in.QueueID)
+	case "rename":
+		e = s.App.RenameQueue(r.Context(), in.QueueID, in.Name)
+	case "move_queue":
+		e = s.App.ReorderQueues(r.Context(), in.QueueID, in.Position)
+	case "reorder":
+		e = s.App.QueueReorderItems(r.Context(), in.QueueID, in.Order, "REORDER")
+	case "reverse":
+		q := append([]string(nil), in.Order...)
+		for i, j := 0, len(q)-1; i < j; i, j = i+1, j-1 {
+			q[i], q[j] = q[j], q[i]
+		}
+		e = s.App.QueueReorderItems(r.Context(), in.QueueID, q, "REVERSE")
+	case "randomize":
+		e = s.App.QueueReorderItems(r.Context(), in.QueueID, in.Order, "RANDOMIZE")
 	default:
 		e = fmt.Errorf("invalid action")
 	}
