@@ -10,4 +10,8 @@ export MUSICOLET_REAL_BACKUP="$1"
 if [[ $# -eq 2 ]]; then
   export MUSICOLET_REAL_BASE_BACKUP="$2"
 fi
+
 go test -tags=integration ./internal/musicolet -run '^TestRealMusicoletBackup' -v
+if [[ $# -eq 2 ]]; then
+  go test -tags=integration ./internal/app -run '^TestRealImportProcedureV1ServerMV2$' -v
+fi
