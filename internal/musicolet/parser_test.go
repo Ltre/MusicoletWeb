@@ -28,7 +28,7 @@ func TestParsePlainJSONFixtures(t *testing.T) {
 	write("0.qstk", `{"S0_CPQ":1,"S0_PQ":[{"S0_PQ_T":"Q1","S0_PQ_CPS":0,"S0_PQ_LKP":1000,"S0_PQ_OQS":{"S_P":["/a.mp3"]}},{"S0_PQ_T":"Q2","S0_PQ_CPS":1,"S0_PQ_LKP":12000,"S0_PQ_OQS":{"S_P":["/a.mp3","/b.mp3"]}}]}`)
 	z.Close()
 	f.Close()
-	s, e := (Parser{}).ParseZip(context.Background(), p, dir)
+	s, report, e := (Parser{}).ParseZipWithReport(context.Background(), p, dir)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -43,6 +43,9 @@ func TestParsePlainJSONFixtures(t *testing.T) {
 	}
 	if !bytes.Contains(CanonicalSnapshot(s), []byte(`"paths"`)) {
 		t.Fatal("canonical missing")
+	}
+	if report.Playlists != 1 || report.PlaylistItems != 2 || report.Favorites != 1 || report.Queues != 2 || report.QueueItems != 3 || report.OrphanPlaylistItems != 2 || report.OrphanFavorites != 1 || report.OrphanQueueItems != 3 {
+		t.Fatalf("unexpected summary: %#v", report)
 	}
 }
 
@@ -109,7 +112,7 @@ func TestSafeArchivePath(t *testing.T) {
 	if err != nil || filepath.ToSlash(good) != "nested/playlist/file.json" {
 		t.Fatalf("good=%q err=%v", good, err)
 	}
-	for _, bad := range []string{"../escape", "/absolute", "a/../../escape", `..\escape`} {
+	for _, bad := range []string{"../escape", "/absolute", "a/../../escape", `..\\escape`} {
 		if _, err := safeArchivePath(bad); err == nil {
 			t.Fatalf("unsafe path accepted: %q", bad)
 		}
