@@ -149,8 +149,6 @@ func (s *Store) mergeIndex(base, ours, theirs string) (string, []IndexConflict, 
 	_ = os.Remove(idxPath)
 	defer os.Remove(idxPath)
 	env := []string{"GIT_INDEX_FILE=" + idxPath}
-	// -i makes read-tree update only the temporary index. This is required for
-	// MusicoletWeb's bare audit repository, which intentionally has no work tree.
 	if _, err = s.run(env, "read-tree", "-i", "-m", base, ours, theirs); err != nil {
 		return "", nil, err
 	}
@@ -200,11 +198,26 @@ func (s *Store) ConflictIndex(base, ours, theirs string) ([]IndexConflict, error
 }
 
 func (s *Store) CommitTree(ref, msg, tree string, parents ...string) (string, error) {
-	args := []string{"commit-tree", tree}
+	old := s.Head(ref)
+	cleanParents := make([]string, 0, len(parents))
 	for _, p := range parents {
 		if strings.TrimSpace(p) != "" {
-			args = append(args, "-p", p)
+			cleanParents = append(cleanParents, p)
 		}
+	}
+	if old != "" {
+		if len(cleanParents) == 0 || cleanParents[0] != old {
+			got := "<none>"
+			if len(cleanParents) > 0 {
+				got = cleanParents[0]
+			}
+			return "", fmt.Errorf("git ref %s is at %s but commit first parent is %s", ref, old, got)
+		}
+	}
+
+	args := []string{"commit-tree", tree}
+	for _, p := range cleanParents {
+		args = append(args, "-p", p)
 	}
 	args = append(args, "-m", msg)
 	env := []string{"GIT_AUTHOR_NAME=MusicoletWeb", "GIT_AUTHOR_EMAIL=musicolet@localhost", "GIT_COMMITTER_NAME=MusicoletWeb", "GIT_COMMITTER_EMAIL=musicolet@localhost"}
@@ -213,12 +226,11 @@ func (s *Store) CommitTree(ref, msg, tree string, parents ...string) (string, er
 		return "", err
 	}
 	commit := strings.TrimSpace(string(out))
-	old := s.Head(ref)
-	update := []string{"update-ref", ref, commit}
-	if old != "" {
-		update = append(update, old)
+	expectedOld := old
+	if expectedOld == "" {
+		expectedOld = strings.Repeat("0", 40)
 	}
-	if _, err = s.run(nil, update...); err != nil {
+	if _, err = s.run(nil, "update-ref", ref, commit, expectedOld); err != nil {
 		return "", err
 	}
 	return commit, nil
