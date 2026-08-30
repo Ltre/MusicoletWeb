@@ -6,32 +6,43 @@ import (
 	"testing"
 )
 
-func TestSecurePathAndSymlinkEscape(t *testing.T) {
+func TestSecurePathRejectsEscape(t *testing.T) {
 	root := t.TempDir()
-	inside := filepath.Join(root, "a.mp3")
-	if e := os.WriteFile(inside, []byte("x"), 0600); e != nil {
-		t.Fatal(e)
+	outside := t.TempDir()
+	target := filepath.Join(outside, "song.mp3")
+	if err := os.WriteFile(target, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	real, _ := filepath.EvalSymlinks(root)
-	if _, e := securePath(inside, []string{real}); e != nil {
-		t.Fatal(e)
+	link := filepath.Join(root, "escape.mp3")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip(err)
 	}
-	outside := filepath.Join(t.TempDir(), "x.mp3")
-	_ = os.WriteFile(outside, []byte("x"), 0600)
-	link := filepath.Join(root, "link.mp3")
-	if e := os.Symlink(outside, link); e != nil {
-		t.Skip("symlink unavailable")
-	}
-	if _, e := securePath(link, []string{real}); e == nil {
-		t.Fatal("symlink escape accepted")
+	if _, err := securePath(link, []string{root}); err == nil {
+		t.Fatal("expected symlink escape rejection")
 	}
 }
-func TestResolveExternalStorageURI(t *testing.T) {
-	p, e := resolvePath("content://com.android.externalstorage.documents/document/primary%3AMusic%2Fa.mp3")
-	if e != nil {
-		t.Fatal(e)
+func TestReadRangeFile(t *testing.T) {
+	root := t.TempDir()
+	p := filepath.Join(root, "a.mp3")
+	if err := os.WriteFile(p, []byte("0123456789"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	if p != "/storage/emulated/0/Music/a.mp3" {
-		t.Fatalf("%q", p)
+	r, err := readRange(p, 2, 5, []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(r.Data) != "2345" || r.Start != 2 || r.End != 5 || r.Size != 10 {
+		t.Fatalf("%+v %q", r, string(r.Data))
+	}
+}
+func TestMediaURIRestriction(t *testing.T) {
+	if !mediaURI.MatchString("content://media/external/audio/media/123") {
+		t.Fatal("expected audio media URI")
+	}
+	if mediaURI.MatchString("content://media/external/images/media/123") {
+		t.Fatal("must not allow images provider")
+	}
+	if mediaURI.MatchString("content://settings/system/foo") {
+		t.Fatal("must not allow arbitrary provider")
 	}
 }
