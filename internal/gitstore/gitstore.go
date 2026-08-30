@@ -80,7 +80,9 @@ func (s *Store) mergeIndex(base, ours, theirs string) (string, []IndexConflict, 
 	if err != nil { return "", nil, err }
 	idxPath := idx.Name(); _ = idx.Close(); _ = os.Remove(idxPath); defer os.Remove(idxPath)
 	env := []string{"GIT_INDEX_FILE=" + idxPath}
-	if _, err = s.run(env, "read-tree", "-m", base, ours, theirs); err != nil { return "", nil, err }
+	// -i makes read-tree update only the temporary index. This is required for
+	// MusicoletWeb's bare audit repository, which intentionally has no work tree.
+	if _, err = s.run(env, "read-tree", "-i", "-m", base, ours, theirs); err != nil { return "", nil, err }
 	out, err := s.run(env, "ls-files", "-u")
 	if err != nil { return "", nil, err }
 	var conflicts []IndexConflict
