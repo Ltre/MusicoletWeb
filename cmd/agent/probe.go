@@ -18,6 +18,9 @@ func init() {
 		if err != nil {
 			return err
 		}
+		if len(r.Data) != 1 {
+			return fmt.Errorf("source returned no readable byte")
+		}
 		fmt.Printf("OK size=%d first-byte=%02x source=%s\n", r.Size, r.Data[0], source)
 		os.Exit(0)
 		return nil
