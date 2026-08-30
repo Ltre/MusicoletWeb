@@ -151,9 +151,16 @@ func (s *Service) ActiveProcedure(ctx context.Context) (*Procedure, error) {
 func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
+
 	p, err := s.GetProcedure(ctx, id)
 	if err != nil {
 		return err
+	}
+	if p.Status != "REVIEWING" && p.Status != "RESOLVING" && p.Status != "READY_TO_COMMIT" {
+		return fmt.Errorf("procedure %d cannot analyze from status %s", id, p.Status)
+	}
+	if p.CandidateSnapshotID == 0 {
+		return fmt.Errorf("procedure %d has no candidate snapshot", id)
 	}
 	theirs, err := s.loadSnapshot(ctx, p.CandidateSnapshotID)
 	if err != nil {
@@ -163,11 +170,18 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	if baseSID == 0 {
-		head, _ := s.Store.ServerHead(ctx)
-		_, err = s.Store.DB.ExecContext(ctx, "UPDATE import_procedures SET status='READY_TO_COMMIT',last_analyzed_server_head=?,updated_at=? WHERE id=?", head, db.NowMS(), id)
+	head, err := s.Store.ServerHead(ctx)
+	if err != nil {
 		return err
 	}
+	if baseSID == 0 {
+		r, err := s.Store.DB.ExecContext(ctx, "UPDATE import_procedures SET status='READY_TO_COMMIT',last_analyzed_server_head=?,updated_at=? WHERE id=? AND status IN ('REVIEWING','RESOLVING','READY_TO_COMMIT')", head, db.NowMS(), id)
+		if err != nil {
+			return err
+		}
+		return db.CheckAffected(r)
+	}
+
 	base, err := s.loadSnapshot(ctx, baseSID)
 	if err != nil {
 		return err
@@ -176,8 +190,10 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	head, _ := s.Store.ServerHead(ctx)
-	oldRows, _ := s.ListConflicts(ctx, id)
+	oldRows, err := s.ListConflicts(ctx, id)
+	if err != nil {
+		return err
+	}
 	oldConflicts := map[string]ConflictRow{}
 	stale := map[string]bool{}
 	for _, c := range oldRows {
@@ -185,7 +201,9 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 		oldConflicts[k] = c
 		if c.Status == "RESOLVED" && c.ResolvedHead.Valid && head > c.ResolvedHead.Int64 {
 			var hit int
-			_ = s.Store.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM server_changes WHERE id>? AND target_type=? AND target_key=?)", c.ResolvedHead.Int64, c.TargetType, c.TargetKey).Scan(&hit)
+			if err = s.Store.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM server_changes WHERE id>? AND target_type=? AND target_key=?)", c.ResolvedHead.Int64, c.TargetType, c.TargetKey).Scan(&hit); err != nil {
+				return err
+			}
 			stale[k] = hit != 0
 		}
 	}
@@ -197,18 +215,14 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM semantic_diffs WHERE procedure_id=?", id); err != nil {
 			return err
 		}
-		conf := 0
 		for _, path := range unionSongKeys(base.Songs, ours.Songs, theirs.Songs) {
 			b, o, t := ptr(base.Songs, path), ptr(ours.Songs, path), ptr(theirs.Songs, path)
 			d := merge.MergeSong(b, o, t)
-			op := songOp(b, t)
-			isConf := d.Conflict != nil
-			did, err := insertDiff(ctx, tx, id, "song", path, op, b, o, t, isConf)
+			did, err := insertDiff(ctx, tx, id, "song", path, songOp(b, t), b, o, t, d.Conflict != nil)
 			if err != nil {
 				return err
 			}
-			if isConf {
-				conf++
+			if d.Conflict != nil {
 				if err = insertConflictPreserved(ctx, tx, id, did, "song", path, b, o, t, oldConflicts, stale); err != nil {
 					return err
 				}
@@ -219,8 +233,7 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 			for _, name := range unionListKeys(bm, om, tm) {
 				b, o, t := bm[name], om[name], tm[name]
 				r := merge.MergeOrdered(typ+":"+name, b, o, t)
-				changed := !equal(b, t) || !equal(b, o)
-				if !changed {
+				if equal(b, t) && equal(b, o) {
 					continue
 				}
 				did, err := insertDiff(ctx, tx, id, typ, name, "MEMBERS", b, o, t, len(r.Conflicts) > 0)
@@ -228,7 +241,6 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 					return err
 				}
 				if len(r.Conflicts) > 0 {
-					conf++
 					if err = insertConflictPreserved(ctx, tx, id, did, typ, name, b, o, t, oldConflicts, stale); err != nil {
 						return err
 					}
@@ -243,12 +255,12 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 				return err
 			}
 			if len(r.Conflicts) > 0 {
-				conf++
 				if err = insertConflictPreserved(ctx, tx, id, did, "queue_order", "all", bq, oq, tq, oldConflicts, stale); err != nil {
 					return err
 				}
 			}
 		}
+		conf := 0
 		if err := analyzeFavorites(ctx, tx, id, base, ours, theirs, &conf); err != nil {
 			return err
 		}
@@ -272,15 +284,19 @@ func (s *Service) AnalyzeProcedure(ctx context.Context, id int64) error {
 				}
 			}
 		}
-		status := "READY_TO_COMMIT"
-		if conf > 0 {
-			var unresolved int
-			_ = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM merge_conflicts WHERE procedure_id=? AND status<>'RESOLVED'", id).Scan(&unresolved)
-			if unresolved > 0 {
-				status = "RESOLVING"
-			}
+
+		var unresolved int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM merge_conflicts WHERE procedure_id=? AND status<>'RESOLVED'", id).Scan(&unresolved); err != nil {
+			return err
 		}
-		_, err := tx.ExecContext(ctx, "UPDATE import_procedures SET base_version_id=(SELECT id FROM musicolet_versions ORDER BY version_no DESC LIMIT 1),status=?,last_analyzed_server_head=?,updated_at=? WHERE id=?", status, head, db.NowMS(), id)
-		return err
+		status := "READY_TO_COMMIT"
+		if unresolved > 0 {
+			status = "RESOLVING"
+		}
+		r, err := tx.ExecContext(ctx, "UPDATE import_procedures SET base_version_id=(SELECT id FROM musicolet_versions ORDER BY version_no DESC LIMIT 1),status=?,last_analyzed_server_head=?,updated_at=? WHERE id=? AND status IN ('REVIEWING','RESOLVING','READY_TO_COMMIT')", status, head, db.NowMS(), id)
+		if err != nil {
+			return err
+		}
+		return db.CheckAffected(r)
 	})
 }
