@@ -29,7 +29,11 @@ func TestRealMusicoletBackup20260830(t *testing.T) {
 		OrphanPlaylistItems: 85, OrphanPlaylistPaths: 21,
 		Favorites: 5527, OrphanFavorites: 31,
 		Queues: 14, QueueItems: 15780, OrphanQueueItems: 0,
-		CurrentQueueIndex: 13, HistoricalPeriodSets: 23,
+		// The ZIP contains 23 PCs_* files. PCs_Y_2016 and PCs_Y_2017 are
+		// intentionally empty plaintext files, so only 21 non-empty SQLite
+		// period datasets become semantic PeriodCounts entries. The two empty
+		// source files are still preserved in RawFiles/decrypted artifacts.
+		CurrentQueueIndex: 13, HistoricalPeriodSets: 21,
 	}
 	assertReportCounts(t, report, want)
 	if report.CurrentQueueIndex < 0 || report.CurrentQueueIndex >= len(snap.Queues) {
