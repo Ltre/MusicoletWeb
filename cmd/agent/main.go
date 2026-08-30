@@ -10,15 +10,29 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
+var version = "dev"
+
+const maxChunk = int64(4 << 20)
+
+var mediaURI = regexp.MustCompile(`^content://media/(?:external|internal)(?:_[^/]+)?/audio/media/[0-9]+$`)
+
 type req struct {
 	ID, Path   string
 	Start, End int64
+}
+
+type readResult struct {
+	Data       []byte
+	Start, End int64
+	Size       int64
 }
 
 func main() {
@@ -26,7 +40,12 @@ func main() {
 	token := flag.String("token", os.Getenv("MUSICOLET_AGENT_TOKEN"), "agent token")
 	rootsArg := flag.String("roots", env("MUSICOLET_AGENT_ROOTS", "/storage/emulated/0"), "comma-separated read-only roots")
 	allowHTTP := flag.Bool("allow-http", os.Getenv("MUSICOLET_AGENT_ALLOW_HTTP") == "1", "allow insecure HTTP for local development")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("musicolet-agent", version)
+		return
+	}
 	if *server == "" || *token == "" {
 		fatal("server and token required")
 	}
@@ -49,8 +68,12 @@ func main() {
 	client := &http.Client{Timeout: 0}
 	backoff := time.Second
 	for {
+		connectedAt := time.Now()
 		e = run(client, strings.TrimRight(*server, "/"), *token, roots)
 		fmt.Fprintln(os.Stderr, "agent disconnected:", e)
+		if time.Since(connectedAt) >= 30*time.Second {
+			backoff = time.Second
+		}
 		time.Sleep(backoff)
 		if backoff < time.Minute {
 			backoff *= 2
@@ -59,6 +82,7 @@ func main() {
 		}
 	}
 }
+
 func run(client *http.Client, base, token string, roots []string) error {
 	r, e := http.NewRequest("GET", base+"/api/agent/connect", nil)
 	if e != nil {
@@ -76,6 +100,7 @@ func run(client *http.Client, base, token string, roots []string) error {
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 2<<20)
 	var event string
+	sem := make(chan struct{}, 4)
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "event: ") {
@@ -85,59 +110,151 @@ func run(client *http.Client, base, token string, roots []string) error {
 		if event == "read" && strings.HasPrefix(line, "data: ") {
 			var q req
 			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &q) == nil {
-				go handle(client, base, token, roots, q)
+				sem <- struct{}{}
+				go func() { defer func() { <-sem }(); handle(client, base, token, roots, q) }()
 			}
 			event = ""
 		}
 	}
 	return sc.Err()
 }
+
 func handle(client *http.Client, base, token string, roots []string, q req) {
-	p, e := resolvePath(q.Path)
-	if e == nil {
-		p, e = securePath(p, roots)
-	}
-	var data []byte
-	if e == nil {
-		f, x := os.Open(p)
-		if x != nil {
-			e = x
-		} else {
-			defer f.Close()
-			if q.Start < 0 {
-				q.Start = 0
-			}
-			if _, x = f.Seek(q.Start, io.SeekStart); x != nil {
-				e = x
-			} else {
-				n := int64(4 << 20)
-				if q.End >= q.Start && q.End-q.Start+1 < n {
-					n = q.End - q.Start + 1
-				}
-				data = make([]byte, n)
-				var got int
-				got, e = f.Read(data)
-				if e == io.EOF {
-					e = nil
-				}
-				data = data[:got]
-			}
-		}
-	}
-	req, e2 := http.NewRequest("POST", base+"/api/agent/result/"+url.PathEscape(q.ID), bytes.NewReader(data))
+	rr, e := readRange(q.Path, q.Start, q.End, roots)
+	body := rr.Data
+	req, e2 := http.NewRequest("POST", base+"/api/agent/result/"+url.PathEscape(q.ID), bytes.NewReader(body))
 	if e2 != nil {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if e != nil {
 		req.Header.Set("X-Agent-Error", sanitize(e.Error()))
+	} else {
+		req.Header.Set("X-Agent-Start", strconv.FormatInt(rr.Start, 10))
+		req.Header.Set("X-Agent-End", strconv.FormatInt(rr.End, 10))
+		req.Header.Set("X-Agent-Size", strconv.FormatInt(rr.Size, 10))
 	}
 	resp, e2 := client.Do(req)
 	if e2 == nil {
-		io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
 }
+
+func readRange(source string, start, end int64, roots []string) (readResult, error) {
+	if start < 0 {
+		start = 0
+	}
+	if end < start || end-start+1 > maxChunk {
+		end = start + maxChunk - 1
+	}
+	if mediaURI.MatchString(source) {
+		return readContentMedia(source, start, end)
+	}
+	p, e := resolvePath(source)
+	if e != nil {
+		return readResult{}, e
+	}
+	p, e = securePath(p, roots)
+	if e != nil {
+		return readResult{}, e
+	}
+	f, e := os.Open(p)
+	if e != nil {
+		return readResult{}, e
+	}
+	defer f.Close()
+	st, e := f.Stat()
+	if e != nil {
+		return readResult{}, e
+	}
+	sz := st.Size()
+	if start >= sz {
+		return readResult{}, fmt.Errorf("range not satisfiable")
+	}
+	if end >= sz {
+		end = sz - 1
+	}
+	if _, e = f.Seek(start, io.SeekStart); e != nil {
+		return readResult{}, e
+	}
+	b := make([]byte, end-start+1)
+	n, e := io.ReadFull(f, b)
+	if e == io.EOF || e == io.ErrUnexpectedEOF {
+		e = nil
+	}
+	if e != nil {
+		return readResult{}, e
+	}
+	b = b[:n]
+	actualEnd := start + int64(n) - 1
+	return readResult{Data: b, Start: start, End: actualEnd, Size: sz}, nil
+}
+
+func readContentMedia(uri string, start, end int64) (readResult, error) {
+	if !mediaURI.MatchString(uri) {
+		return readResult{}, fmt.Errorf("unsupported content URI")
+	}
+	sz, err := contentMediaSize(uri)
+	if err != nil {
+		return readResult{}, err
+	}
+	if start >= sz {
+		return readResult{}, fmt.Errorf("range not satisfiable")
+	}
+	if end >= sz {
+		end = sz - 1
+	}
+	cmd := exec.Command("/system/bin/content", "read", "--uri", uri)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return readResult{}, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err = cmd.Start(); err != nil {
+		return readResult{}, err
+	}
+	if start > 0 {
+		if _, err = io.CopyN(io.Discard, stdout, start); err != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return readResult{}, err
+		}
+	}
+	want := end - start + 1
+	b := make([]byte, want)
+	n, readErr := io.ReadFull(stdout, b)
+	if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+		readErr = nil
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	if readErr != nil {
+		return readResult{}, readErr
+	}
+	b = b[:n]
+	return readResult{Data: b, Start: start, End: start + int64(n) - 1, Size: sz}, nil
+}
+
+func contentMediaSize(uri string) (int64, error) {
+	cmd := exec.Command("/system/bin/content", "query", "--uri", uri, "--projection", "_size")
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("content query: %v: %s", err, sanitize(string(o)))
+	}
+	re := regexp.MustCompile(`(?:^|[ ,])_size=([0-9]+)`)
+	m := re.FindStringSubmatch(string(o))
+	if len(m) != 2 {
+		return 0, fmt.Errorf("content provider did not return _size")
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid content size")
+	}
+	return n, nil
+}
+
 func resolvePath(p string) (string, error) {
 	if strings.HasPrefix(p, "file://") {
 		u, e := url.Parse(p)
@@ -163,10 +280,11 @@ func resolvePath(p string) (string, error) {
 		return "", fmt.Errorf("unsupported external storage volume")
 	}
 	if strings.HasPrefix(p, "content://") {
-		return "", fmt.Errorf("content URI cannot be resolved by the Termux-only agent")
+		return "", fmt.Errorf("unsupported content URI")
 	}
 	return p, nil
 }
+
 func securePath(p string, roots []string) (string, error) {
 	abs, e := filepath.Abs(p)
 	if e != nil {
@@ -206,5 +324,3 @@ func env(k, d string) string {
 	return d
 }
 func fatal(s string) { fmt.Fprintln(os.Stderr, s); os.Exit(2) }
-
-var _ = strconv.IntSize
