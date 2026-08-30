@@ -84,6 +84,41 @@ func (s *Service) applyImportJournal(ctx context.Context, jid, pid, versionNo, s
 	})
 }
 
+func (s *Service) recoverJournalCommit(ref, label, msg, parent string, data []byte, parents ...string) (string, error) {
+	cur := s.Git.Head(ref)
+	if cur == parent {
+		return s.Git.CommitJSON(ref, msg, data, parents...)
+	}
+	if cur == "" && parent == "" {
+		return s.Git.CommitJSON(ref, msg, data, parents...)
+	}
+	if cur == "" {
+		return "", fmt.Errorf("%s ref disappeared during journal recovery", label)
+	}
+	ok, err := s.Git.CommitMatches(cur, data, parents...)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("%s ref advanced unexpectedly to %s; refusing to attach journal to unrelated commit", label, cur)
+	}
+	return cur, nil
+}
+
+func (s *Service) validateRecordedJournalCommit(ref, label, commit string, data []byte, parents ...string) error {
+	ok, err := s.Git.CommitMatches(commit, data, parents...)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("recorded %s commit %s does not match journal state/parents", label, commit)
+	}
+	if head := s.Git.Head(ref); head != commit {
+		return fmt.Errorf("%s ref is %s, expected recorded journal commit %s", label, head, commit)
+	}
+	return nil
+}
+
 func (s *Service) RecoverCommitJournals(ctx context.Context) error {
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
@@ -93,7 +128,7 @@ func (s *Service) RecoverCommitJournals(ctx context.Context) error {
 	}
 	defer rows.Close()
 	type jrow struct {
-		id, pid, ver                int64
+		id, pid, ver                   int64
 		state, sp, mp, sc, mc, status string
 	}
 	var js []jrow
@@ -121,43 +156,39 @@ func (s *Service) RecoverCommitJournals(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		sourceData := musicolet.CanonicalSnapshot(theirs)
 
 		sc := j.sc
 		if sc == "" {
-			cur := s.Git.Head("refs/heads/musicolet-source")
-			if cur != "" && cur != j.sp {
-				sc = cur
-			} else {
-				sc, err = s.Git.CommitJSON("refs/heads/musicolet-source", fmt.Sprintf("Musicolet V%d", j.ver), musicolet.CanonicalSnapshot(theirs), j.sp)
-				if err != nil {
-					return err
-				}
+			sc, err = s.recoverJournalCommit("refs/heads/musicolet-source", "musicolet-source", fmt.Sprintf("Musicolet V%d", j.ver), j.sp, sourceData, j.sp)
+			if err != nil {
+				return err
 			}
 			if _, err = s.Store.DB.ExecContext(ctx, "UPDATE commit_journal SET source_commit=?,status='SOURCE_DONE',updated_at=? WHERE id=?", sc, db.NowMS(), j.id); err != nil {
 				return err
 			}
+		} else if err = s.validateRecordedJournalCommit("refs/heads/musicolet-source", "musicolet-source", sc, sourceData, j.sp); err != nil {
+			return err
 		}
 
+		parents := []string{}
+		if j.mp != "" {
+			parents = append(parents, j.mp)
+		}
+		parents = append(parents, sc)
 		mc := j.mc
 		if mc == "" {
-			cur := s.Git.Head("refs/heads/main")
-			if cur != "" && cur != j.mp {
-				mc = cur
-			} else {
-				parents := []string{}
-				if j.mp != "" {
-					parents = append(parents, j.mp)
-				}
-				parents = append(parents, sc)
-				mc, err = s.Git.CommitJSON("refs/heads/main", fmt.Sprintf("Import Musicolet V%d", j.ver), []byte(j.state), parents...)
-				if err != nil {
-					return err
-				}
+			mc, err = s.recoverJournalCommit("refs/heads/main", "main", fmt.Sprintf("Import Musicolet V%d", j.ver), j.mp, []byte(j.state), parents...)
+			if err != nil {
+				return err
 			}
 			if _, err = s.Store.DB.ExecContext(ctx, "UPDATE commit_journal SET main_commit=?,status='GIT_DONE',updated_at=? WHERE id=?", mc, db.NowMS(), j.id); err != nil {
 				return err
 			}
+		} else if err = s.validateRecordedJournalCommit("refs/heads/main", "main", mc, []byte(j.state), parents...); err != nil {
+			return err
 		}
+
 		if err = s.applyImportJournal(ctx, j.id, j.pid, j.ver, p.CandidateSnapshotID, p.SHA256, result, mc); err != nil {
 			return err
 		}
