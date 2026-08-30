@@ -5,9 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/Ltre/MusicoletWeb/internal/db"
 	"github.com/Ltre/MusicoletWeb/internal/domain"
-	"time"
 )
 
 func (s *Service) Playback(ctx context.Context) (PlaybackView, error) {
@@ -82,61 +83,89 @@ func (s *Service) EnsureSourceQueue(ctx context.Context, sourceType, sourceKey, 
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
 	var qid int64
-	var qname string
-	e := s.Store.DB.QueryRowContext(ctx, "SELECT id FROM working_queues WHERE source_type=? AND source_key=?", sourceType, sourceKey).Scan(&qid)
-	created := false
-	if e == sql.ErrNoRows {
-		created = true
-		candidate := name
-		if candidate == "" {
-			candidate = "Queue"
+	err := s.Store.DB.QueryRowContext(ctx, "SELECT id FROM working_queues WHERE source_type=? AND source_key=?", sourceType, sourceKey).Scan(&qid)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if err == nil {
+		if playPath == "" {
+			_ = s.Store.DB.QueryRowContext(ctx, "SELECT path FROM working_queue_items WHERE queue_id=? ORDER BY position LIMIT 1", qid).Scan(&playPath)
 		}
-		for n := 2; ; n++ {
-			var exists int
-			_ = s.Store.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM working_queues WHERE name=?)", candidate).Scan(&exists)
-			if exists == 0 {
+		if err = s.SetPlayback(ctx, qid, playPath, 0, true); err != nil {
+			return 0, err
+		}
+		return qid, nil
+	}
+
+	candidate := name
+	if candidate == "" {
+		candidate = "Queue"
+	}
+	baseName := candidate
+	for n := 2; ; n++ {
+		var exists int
+		if err = s.Store.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM working_queues WHERE name=?)", candidate).Scan(&exists); err != nil {
+			return 0, err
+		}
+		if exists == 0 {
+			break
+		}
+		candidate = fmt.Sprintf("%s #%d", baseName, n)
+	}
+	qname := candidate
+	items := unique(paths)
+	if shuffleNew {
+		deterministicShuffle(items, time.Now().UnixNano())
+	}
+	if playPath == "" && len(items) > 0 {
+		playPath = items[0]
+	}
+	if playPath != "" {
+		found := false
+		for _, p := range items {
+			if p == playPath {
+				found = true
 				break
 			}
-			candidate = fmt.Sprintf("%s #%d", name, n)
 		}
-		r, e := s.Store.DB.ExecContext(ctx, "INSERT INTO working_queues(name,sort_position,source_type,source_key) VALUES(?,COALESCE((SELECT MAX(sort_position)+1 FROM working_queues),0),?,?)", candidate, sourceType, sourceKey)
-		if e != nil {
-			return 0, e
+		if !found {
+			return 0, errors.New("play song is not in source queue")
 		}
-		qid, _ = r.LastInsertId()
-		qname = candidate
-		items := unique(paths)
-		if shuffleNew {
-			deterministicShuffle(items, time.Now().UnixNano())
+	}
+	targets := [][2]string{}
+	if playPath != "" {
+		targets = append(targets, [2]string{"song", playPath})
+	}
+	after := map[string]any{"source_type": sourceType, "source_key": sourceKey, "name": qname, "paths": items}
+	err = s.applyChangeLocked(ctx, "queue", qname, "CREATE_FROM_SOURCE", nil, after, func(tx *sql.Tx) error {
+		r, err := tx.ExecContext(ctx, "INSERT INTO working_queues(name,sort_position,source_type,source_key) VALUES(?,COALESCE((SELECT MAX(sort_position)+1 FROM working_queues),0),?,?)", qname, sourceType, sourceKey)
+		if err != nil {
+			return err
+		}
+		qid, err = r.LastInsertId()
+		if err != nil {
+			return err
 		}
 		for i, p := range items {
-			_, _ = s.Store.DB.ExecContext(ctx, "INSERT OR IGNORE INTO working_queue_items(queue_id,path,position) VALUES(?,?,?)", qid, p, i)
+			if _, err = tx.ExecContext(ctx, "INSERT INTO working_queue_items(queue_id,path,position) VALUES(?,?,?)", qid, p, i); err != nil {
+				return err
+			}
 		}
-	} else if e != nil {
-		return 0, e
-	} else {
-		_ = s.Store.DB.QueryRowContext(ctx, "SELECT name FROM working_queues WHERE id=?", qid).Scan(&qname)
-	}
-	if playPath == "" {
-		var p string
-		_ = s.Store.DB.QueryRowContext(ctx, "SELECT path FROM working_queue_items WHERE queue_id=? ORDER BY position LIMIT 1", qid).Scan(&p)
-		playPath = p
-	}
-	if e = s.SetPlayback(ctx, qid, playPath, 0, true); e != nil {
-		return 0, e
-	}
-	if created {
-		return qid, s.recordChangeLocked(ctx, "queue", qname, "CREATE_FROM_SOURCE", nil, map[string]any{"source_type": sourceType, "source_key": sourceKey, "name": qname}, [2]string{"song", playPath})
-	}
-	return qid, nil
+		if _, err = tx.ExecContext(ctx, "INSERT INTO queue_playback_state(queue_id,current_path,position_ms,updated_at) VALUES(?,?,0,?) ON CONFLICT(queue_id) DO UPDATE SET current_path=excluded.current_path,position_ms=0,updated_at=excluded.updated_at", qid, null(playPath), db.NowMS()); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE runtime_playback_state SET queue_id=?,playing=?,updated_at=? WHERE singleton=1", qid, boolInt(playPath != ""), db.NowMS())
+		return err
+	}, targets...)
+	return qid, err
 }
 
 func (s *Service) QueueAdd(ctx context.Context, qid int64, path string, next bool) error {
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
 	var qname string
-	if e := s.Store.DB.QueryRowContext(ctx, "SELECT name FROM working_queues WHERE id=?", qid).Scan(&qname); e != nil {
-		return e
+	if err := s.Store.DB.QueryRowContext(ctx, "SELECT name FROM working_queues WHERE id=?", qid).Scan(&qname); err != nil {
+		return err
 	}
 	before := queuePaths(ctx, s.Store.DB, qid)
 	cur := ""
@@ -152,24 +181,25 @@ func (s *Service) QueueAdd(ctx context.Context, qid int64, path string, next boo
 		}
 	}
 	after = insertString(after, path, pos)
-	if e := rewriteQueue(ctx, s.Store.DB, qid, after); e != nil {
-		return e
-	}
-	return s.recordChangeLocked(ctx, "queue", qname, "ADD_OR_MOVE", before, after, [2]string{"song", path})
+	return s.applyChangeLocked(ctx, "queue", qname, "ADD_OR_MOVE", before, after, func(tx *sql.Tx) error {
+		return rewriteQueueTx(ctx, tx, qid, after)
+	}, [2]string{"song", path})
 }
 
 func (s *Service) QueueRemove(ctx context.Context, qid int64, path string) error {
 	s.mutation.Lock()
 	defer s.mutation.Unlock()
 	var qname string
-	if e := s.Store.DB.QueryRowContext(ctx, "SELECT name FROM working_queues WHERE id=?", qid).Scan(&qname); e != nil {
-		return e
+	if err := s.Store.DB.QueryRowContext(ctx, "SELECT name FROM working_queues WHERE id=?", qid).Scan(&qname); err != nil {
+		return err
 	}
 	before := queuePaths(ctx, s.Store.DB, qid)
 	after := removeString(append([]string{}, before...), path)
-	if e := rewriteQueue(ctx, s.Store.DB, qid, after); e != nil {
-		return e
-	}
-	_, _ = s.Store.DB.ExecContext(ctx, "UPDATE queue_playback_state SET stop_path=NULL WHERE queue_id=? AND stop_path=?", qid, path)
-	return s.recordChangeLocked(ctx, "queue", qname, "REMOVE", before, after, [2]string{"song", path})
+	return s.applyChangeLocked(ctx, "queue", qname, "REMOVE", before, after, func(tx *sql.Tx) error {
+		if err := rewriteQueueTx(ctx, tx, qid, after); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, "UPDATE queue_playback_state SET stop_path=NULL WHERE queue_id=? AND stop_path=?", qid, path)
+		return err
+	}, [2]string{"song", path})
 }
