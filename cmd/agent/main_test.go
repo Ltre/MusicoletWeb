@@ -46,3 +46,35 @@ func TestMediaURIRestriction(t *testing.T) {
 		t.Fatal("must not allow arbitrary provider")
 	}
 }
+
+func TestMusicoletMediaStoreCandidates(t *testing.T) {
+	in := "musicolet://media-store?p_v=primary&p_rp=1%2Fytdl%2F%E6%BD%AE%E5%B7%9E%E6%AD%8C&p_dn=%E8%80%81%E5%8E%9D.m4a&p_id=1000603564&p_mt=1"
+	got := musicoletMediaStoreCandidates(in)
+	want := []string{
+		"content://media/external_primary/audio/media/1000603564",
+		"content://media/external/audio/media/1000603564",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("candidates=%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidate[%d]=%q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestMusicoletMediaStoreCandidatesRejectUnsafe(t *testing.T) {
+	bad := []string{
+		"musicolet://media-store?p_v=primary&p_id=12&p_mt=2",
+		"musicolet://media-store?p_v=../../etc&p_id=12&p_mt=1",
+		"musicolet://media-store?p_v=primary&p_id=12%2F34&p_mt=1",
+		"musicolet://media-store?p_v=primary&p_id=12&p_mt=1&evil=x",
+		"musicolet://other?p_v=primary&p_id=12&p_mt=1",
+	}
+	for _, in := range bad {
+		if got := musicoletMediaStoreCandidates(in); len(got) != 0 {
+			t.Fatalf("unsafe URI accepted: %q => %v", in, got)
+		}
+	}
+}
