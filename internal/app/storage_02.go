@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,282 +13,24 @@ import (
 	"strings"
 )
 
-func insertConflictPreserved(ctx context.Context, tx *sql.Tx, pid, did int64, typ, key string, b, o, t any, old map[string]ConflictRow, stale map[string]bool) error {
-	k := typ + "\x00" + key
-	if c, ok := old[k]; ok && c.Resolution != "" {
-		status := c.Status
-		if stale[k] {
-			status = "STALE"
-		}
-		_, e := tx.ExecContext(ctx, "INSERT INTO merge_conflicts(procedure_id,diff_id,target_type,target_key,base_json,ours_json,theirs_json,status,resolved_server_head,resolution,manual_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", pid, did, typ, key, merge.JSON(b), merge.JSON(o), merge.JSON(t), status, c.ResolvedHead, c.Resolution, string(c.Manual), db.NowMS())
-		return e
-	}
-	return insertConflict(ctx, tx, pid, did, typ, key, b, o, t)
-}
-
-func analyzeFavorites(ctx context.Context, tx *sql.Tx, pid int64, b, o, t domain.Snapshot, conf *int) error {
-	keys := map[string]bool{}
-	for p := range b.Favorites {
-		keys[p] = true
-	}
-	for p := range o.Favorites {
-		keys[p] = true
-	}
-	for p := range t.Favorites {
-		keys[p] = true
-	}
-	for p := range keys {
-		bv, ov, tv := b.Favorites[p], o.Favorites[p], t.Favorites[p]
-		if bv == ov && bv == tv {
-			continue
-		}
-		c := ov != bv && tv != bv && ov != tv
-		did, e := insertDiff(ctx, tx, pid, "favorite", p, "TOGGLE", bv, ov, tv, c)
-		if e != nil {
-			return e
-		}
-		if c {
-			*conf++
-			if e = insertConflict(ctx, tx, pid, did, "favorite", p, bv, ov, tv); e != nil {
-				return e
-			}
-		}
-	}
-	return nil
-}
-
-func analyzeCounts(ctx context.Context, tx *sql.Tx, pid int64, b, o, t domain.Snapshot) error {
-	for _, p := range unionSongKeys(b.Songs, o.Songs, t.Songs) {
-		bv, ov, tv := b.Songs[p].PlayCount, o.Songs[p].PlayCount, t.Songs[p].PlayCount
-		if bv != tv || bv != ov {
-			_, e := insertDiff(ctx, tx, pid, "playcount", p, "DELTA", bv, ov, tv, false)
-			if e != nil {
-				return e
-			}
-		}
-	}
-	return nil
-}
-
-func mergeFavorites(b, o, t map[string]bool) map[string]bool {
-	r := map[string]bool{}
-	keys := map[string]bool{}
-	for p := range b {
-		keys[p] = true
-	}
-	for p := range o {
-		keys[p] = true
-	}
-	for p := range t {
-		keys[p] = true
-	}
-	for p := range keys {
-		bv, ov, tv := b[p], o[p], t[p]
-		v := ov
-		if ov == bv {
-			v = tv
-		} else if tv == bv {
-			v = ov
-		} else if ov == tv {
-			v = ov
-		}
-		if v {
-			r[p] = true
-		}
-	}
-	return r
-}
-
-func resolveLists(typ string, b, o, t []domain.Playlist, cm map[string]ConflictRow) []domain.Playlist {
-	bm, om, tm := mapPL(b), mapPL(o), mapPL(t)
-	var out []domain.Playlist
-	for _, n := range unionListKeys(bm, om, tm) {
-		r := merge.MergeOrdered(typ+":"+n, bm[n], om[n], tm[n])
-		items := r.Items
-		if len(r.Conflicts) > 0 {
-			items = chooseList(cm[typ+"\x00"+n], om[n], tm[n])
-		}
-		if items != nil {
-			out = append(out, domain.Playlist{Name: n, Paths: items})
-		}
-	}
-	return out
-}
-
-func resolveQueues(b, o, t []domain.Queue, cm map[string]ConflictRow) []domain.Queue {
-	bm, om, tm := mapQ(b), mapQ(o), mapQ(t)
-	meta := map[string]domain.Queue{}
-	for _, q := range o {
-		meta[q.Name] = q
-	}
-	for _, q := range t {
-		if _, ok := meta[q.Name]; !ok {
-			meta[q.Name] = q
-		}
-	}
-	var out []domain.Queue
-	for _, n := range unionListKeys(bm, om, tm) {
-		r := merge.MergeOrdered("queue:"+n, bm[n], om[n], tm[n])
-		items := r.Items
-		if len(r.Conflicts) > 0 {
-			items = chooseList(cm["queue\x00"+n], om[n], tm[n])
-		}
-		if items != nil {
-			q := meta[n]
-			q.Name = n
-			q.Paths = items
-			out = append(out, q)
-		}
-	}
-	return out
-}
-
-func mapPL(a []domain.Playlist) map[string][]string {
-	m := map[string][]string{}
-	for _, x := range a {
-		m[x.Name] = x.Paths
-	}
-	return m
-}
-
-func mapQ(a []domain.Queue) map[string][]string {
-	m := map[string][]string{}
-	for _, x := range a {
-		m[x.Name] = x.Paths
-	}
-	return m
-}
-
-func chooseSong(c ConflictRow, o, t *domain.Song) *domain.Song {
-	switch c.Resolution {
-	case "OURS":
-		return o
-	case "THEIRS":
-		return t
-	case "MANUAL":
-		var x domain.Song
-		if json.Unmarshal(c.Manual, &x) == nil {
-			return &x
-		}
-	}
-	return o
-}
-
-func chooseList(c ConflictRow, o, t []string) []string {
-	switch c.Resolution {
-	case "OURS":
-		return o
-	case "THEIRS":
-		return t
-	case "MANUAL":
-		var x []string
-		if json.Unmarshal(c.Manual, &x) == nil {
-			return x
-		}
-	}
-	return o
-}
-
-func unionPeriodKeys(ms ...map[string]map[string]int64) []string {
-	m := map[string]bool{}
-	for _, x := range ms {
-		for k := range x {
-			m[k] = true
-		}
-	}
-	r := []string{}
-	for k := range m {
-		r = append(r, k)
-	}
-	sort.Strings(r)
-	return r
-}
-
-func unionCountPaths(ms ...map[string]int64) []string {
-	m := map[string]bool{}
-	for _, x := range ms {
-		for k := range x {
-			m[k] = true
-		}
-	}
-	r := []string{}
-	for k := range m {
-		r = append(r, k)
-	}
-	sort.Strings(r)
-	return r
-}
-
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}
-
-func null(s string) any {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	return s
-}
-
-func scanWorkingSong(row *sql.Row, x *domain.Song) error {
-	var raw string
-	var ch int
-	e := row.Scan(&x.FileID, &x.Path, &x.Title, &x.Artist, &x.Album, &x.AlbumArtist, &x.Composer, &x.Genre, &x.Lyrics, &x.TrackNo, &x.DiscNo, &x.Year, &x.Comment, &x.DurationMS, &x.FileName, &x.Folder, &x.ModifiedMS, &x.AddedMS, &x.LastPlayedMS, &x.PlayCount, &raw, &ch)
-	x.Raw = []byte(raw)
-	x.HasServerChanges = ch != 0
-	return e
-}
-
-func loadLists(ctx context.Context, q interface {
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, head, item, keycol string, id int64) ([]domain.Playlist, error) {
-	rows, e := q.QueryContext(ctx, fmt.Sprintf("SELECT name FROM %s WHERE %s=? ORDER BY position", head, keycol), id)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	var out []domain.Playlist
-	for rows.Next() {
-		var n string
-		rows.Scan(&n)
-		ir, _ := q.QueryContext(ctx, fmt.Sprintf("SELECT path FROM %s WHERE %s=? AND playlist_name=? ORDER BY position", item, keycol), id, n)
-		var paths []string
-		if ir != nil {
-			for ir.Next() {
-				var p string
-				ir.Scan(&p)
-				paths = append(paths, p)
-			}
-			ir.Close()
-		}
-		out = append(out, domain.Playlist{Name: n, Paths: paths})
-	}
-	return out, nil
-}
-
-func loadQueues(ctx context.Context, q *sql.DB, sid int64) ([]domain.Queue, error) {
-	rows, e := q.QueryContext(ctx, "SELECT name,current_index,position_ms FROM snapshot_queues WHERE snapshot_id=? ORDER BY position", sid)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	var out []domain.Queue
-	for rows.Next() {
-		var x domain.Queue
-		rows.Scan(&x.Name, &x.CurrentIndex, &x.PositionMS)
-		ir, _ := q.QueryContext(ctx, "SELECT path FROM snapshot_queue_items WHERE snapshot_id=? AND queue_name=? ORDER BY position", sid, x.Name)
-		if ir != nil {
-			for ir.Next() {
-				var p string
-				ir.Scan(&p)
-				x.Paths = append(x.Paths, p)
-			}
-			ir.Close()
-		}
-		out = append(out, x)
-	}
-	return out, nil
-}
+func insertConflictPreserved(ctx context.Context,tx *sql.Tx,pid,did int64,typ,key string,b,o,t any,old map[string]ConflictRow,stale map[string]bool)error{k:=typ+"\x00"+key;if c,ok:=old[k];ok&&c.Resolution!=""{status:=c.Status;if stale[k]{status="STALE"};_,e:=tx.ExecContext(ctx,"INSERT INTO merge_conflicts(procedure_id,diff_id,target_type,target_key,base_json,ours_json,theirs_json,status,resolved_server_head,resolution,manual_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",pid,did,typ,key,merge.JSON(b),merge.JSON(o),merge.JSON(t),status,c.ResolvedHead,c.Resolution,string(c.Manual),db.NowMS());return e};return insertConflict(ctx,tx,pid,did,typ,key,b,o,t)}
+func analyzeFavorites(ctx context.Context,tx *sql.Tx,pid int64,b,o,t domain.Snapshot,conf *int)error{keys:=map[string]bool{};for p:=range b.Favorites{keys[p]=true};for p:=range o.Favorites{keys[p]=true};for p:=range t.Favorites{keys[p]=true};for p:=range keys{bv,ov,tv:=b.Favorites[p],o.Favorites[p],t.Favorites[p];if bv==ov&&bv==tv{continue};c:=ov!=bv&&tv!=bv&&ov!=tv;did,e:=insertDiff(ctx,tx,pid,"favorite",p,"TOGGLE",bv,ov,tv,c);if e!=nil{return e};if c{*conf++;if e=insertConflict(ctx,tx,pid,did,"favorite",p,bv,ov,tv);e!=nil{return e}}};return nil}
+func analyzeCounts(ctx context.Context,tx *sql.Tx,pid int64,b,o,t domain.Snapshot)error{for _,p:=range unionSongKeys(b.Songs,o.Songs,t.Songs){bv,ov,tv:=b.Songs[p].PlayCount,o.Songs[p].PlayCount,t.Songs[p].PlayCount;if bv!=tv||bv!=ov{if _,e:=insertDiff(ctx,tx,pid,"playcount",p,"DELTA",bv,ov,tv,false);e!=nil{return e}};bl,ol,tl:=b.Songs[p].LastPlayedMS,o.Songs[p].LastPlayedMS,t.Songs[p].LastPlayedMS;if bl!=ol||bl!=tl{if _,e:=insertDiff(ctx,tx,pid,"last_played",p,"MAX",bl,ol,tl,false);e!=nil{return e}}};for _,period:=range unionPeriodKeys(b.PeriodCounts,o.PeriodCounts,t.PeriodCounts){for _,p:=range unionCountPaths(b.PeriodCounts[period],o.PeriodCounts[period],t.PeriodCounts[period]){bv,ov,tv:=b.PeriodCounts[period][p],o.PeriodCounts[period][p],t.PeriodCounts[period][p];if bv!=ov||bv!=tv{if _,e:=insertDiff(ctx,tx,pid,"period_count",period+"::"+p,"DELTA",bv,ov,tv,false);e!=nil{return e}}}};for _,p:=range unionCurrentCountPaths(b.CurrentCounts,o.CurrentCounts,t.CurrentCounts){bv,ov,tv:=b.CurrentCounts[p],o.CurrentCounts[p],t.CurrentCounts[p];if bv!=ov||bv!=tv{if _,e:=insertDiff(ctx,tx,pid,"current_period_counts",p,"DELTA",bv,ov,tv,false);e!=nil{return e}}};return nil}
+func analyzeSettings(ctx context.Context,tx *sql.Tx,pid int64,b,o,t domain.Snapshot)error{keys:=map[string]bool{};for k:=range b.Settings{keys[k]=true};for k:=range o.Settings{keys[k]=true};for k:=range t.Settings{keys[k]=true};ordered:=make([]string,0,len(keys));for k:=range keys{ordered=append(ordered,k)};sort.Strings(ordered);for _,k:=range ordered{bv,ov,tv:=b.Settings[k],o.Settings[k],t.Settings[k];if bytes.Equal(bv,ov)&&bytes.Equal(bv,tv){continue};op:="MODIFY";if len(bv)==0&&len(tv)>0{op="ADD"}else if len(bv)>0&&len(tv)==0{op="DELETE"};if _,e:=insertDiff(ctx,tx,pid,"setting",k,op,json.RawMessage(bv),json.RawMessage(ov),json.RawMessage(tv),false);e!=nil{return e}};return nil}
+func mergeSettings(b,o,t map[string]json.RawMessage)map[string]json.RawMessage{r:=map[string]json.RawMessage{};keys:=map[string]bool{};for k:=range b{keys[k]=true};for k:=range o{keys[k]=true};for k:=range t{keys[k]=true};for k:=range keys{bv,ov,tv:=b[k],o[k],t[k];var v json.RawMessage;switch{case bytes.Equal(ov,bv):v=tv;case bytes.Equal(tv,bv):v=ov;case bytes.Equal(ov,tv):v=ov;default:v=tv};if len(v)>0{r[k]=append(json.RawMessage(nil),v...)}};return r}
+func mergeFavorites(b,o,t map[string]bool)map[string]bool{r:=map[string]bool{};keys:=map[string]bool{};for p:=range b{keys[p]=true};for p:=range o{keys[p]=true};for p:=range t{keys[p]=true};for p:=range keys{bv,ov,tv:=b[p],o[p],t[p];v:=ov;if ov==bv{v=tv}else if tv==bv{v=ov}else if ov==tv{v=ov};if v{r[p]=true}};return r}
+func resolveLists(typ string,b,o,t []domain.Playlist,cm map[string]ConflictRow)[]domain.Playlist{bm,om,tm:=mapPL(b),mapPL(o),mapPL(t);var out []domain.Playlist;for _,n:=range unionListKeys(bm,om,tm){r:=merge.MergeOrdered(typ+":"+n,bm[n],om[n],tm[n]);items:=r.Items;if len(r.Conflicts)>0{items=chooseList(cm[typ+"\x00"+n],om[n],tm[n])};if items!=nil{items=unique(items);out=append(out,domain.Playlist{Name:n,Paths:items})}};return out}
+func resolveQueues(b,o,t []domain.Queue,cm map[string]ConflictRow)[]domain.Queue{bm,om,tm:=mapQ(b),mapQ(o),mapQ(t);meta:=map[string]domain.Queue{};for _,q:=range o{meta[q.Name]=q};for _,q:=range t{if _,ok:=meta[q.Name];!ok{meta[q.Name]=q}};var out []domain.Queue;for _,n:=range unionListKeys(bm,om,tm){r:=merge.MergeOrdered("queue:"+n,bm[n],om[n],tm[n]);items:=r.Items;if len(r.Conflicts)>0{items=chooseList(cm["queue\x00"+n],om[n],tm[n])};if items!=nil{items=unique(items);q:=meta[n];q.Name=n;q.Paths=items;out=append(out,q)}};return out}
+func mapPL(a []domain.Playlist)map[string][]string{m:=map[string][]string{};for _,x:=range a{m[x.Name]=x.Paths};return m}
+func mapQ(a []domain.Queue)map[string][]string{m:=map[string][]string{};for _,x:=range a{m[x.Name]=x.Paths};return m}
+func chooseSong(c ConflictRow,o,t *domain.Song)*domain.Song{switch c.Resolution{case "OURS":return o;case "THEIRS":return t;case "MANUAL":var x domain.Song;if json.Unmarshal(c.Manual,&x)==nil{return &x}};return o}
+func chooseList(c ConflictRow,o,t []string)[]string{switch c.Resolution{case "OURS":return o;case "THEIRS":return t;case "MANUAL":var x []string;if json.Unmarshal(c.Manual,&x)==nil{return x}};return o}
+func unionPeriodKeys(ms ...map[string]map[string]int64)[]string{m:=map[string]bool{};for _,x:=range ms{for k:=range x{m[k]=true}};r:=[]string{};for k:=range m{r=append(r,k)};sort.Strings(r);return r}
+func unionCountPaths(ms ...map[string]int64)[]string{m:=map[string]bool{};for _,x:=range ms{for k:=range x{m[k]=true}};r:=[]string{};for k:=range m{r=append(r,k)};sort.Strings(r);return r}
+func unionCurrentCountPaths(ms ...map[string]domain.CurrentCounts)[]string{m:=map[string]bool{};for _,x:=range ms{for k:=range x{m[k]=true}};r:=make([]string,0,len(m));for k:=range m{r=append(r,k)};sort.Strings(r);return r}
+func boolInt(v bool)int{if v{return 1};return 0}
+func null(s string)any{if strings.TrimSpace(s)==""{return nil};return s}
+func scanWorkingSong(row *sql.Row,x *domain.Song)error{var raw string;var ch int;e:=row.Scan(&x.FileID,&x.Path,&x.Title,&x.Artist,&x.Album,&x.AlbumArtist,&x.Composer,&x.Genre,&x.Lyrics,&x.TrackNo,&x.DiscNo,&x.Year,&x.Comment,&x.DurationMS,&x.FileName,&x.Folder,&x.ModifiedMS,&x.AddedMS,&x.LastPlayedMS,&x.PlayCount,&raw,&ch);x.Raw=[]byte(raw);x.HasServerChanges=ch!=0;return e}
+func loadLists(ctx context.Context,q interface{QueryContext(context.Context,string,...any)(*sql.Rows,error)},head,item,keycol string,id int64)([]domain.Playlist,error){rows,e:=q.QueryContext(ctx,fmt.Sprintf("SELECT name FROM %s WHERE %s=? ORDER BY position",head,keycol),id);if e!=nil{return nil,e};defer rows.Close();var out []domain.Playlist;for rows.Next(){var n string;rows.Scan(&n);ir,_:=q.QueryContext(ctx,fmt.Sprintf("SELECT path FROM %s WHERE %s=? AND playlist_name=? ORDER BY position",item,keycol),id,n);var paths []string;if ir!=nil{for ir.Next(){var p string;ir.Scan(&p);paths=append(paths,p)};ir.Close()};out=append(out,domain.Playlist{Name:n,Paths:paths})};return out,nil}
+func loadQueues(ctx context.Context,q *sql.DB,sid int64)([]domain.Queue,error){rows,e:=q.QueryContext(ctx,"SELECT name,current_index,position_ms FROM snapshot_queues WHERE snapshot_id=? ORDER BY position",sid);if e!=nil{return nil,e};defer rows.Close();var out []domain.Queue;for rows.Next(){var x domain.Queue;rows.Scan(&x.Name,&x.CurrentIndex,&x.PositionMS);ir,_:=q.QueryContext(ctx,"SELECT path FROM snapshot_queue_items WHERE snapshot_id=? AND queue_name=? ORDER BY position",sid,x.Name);if ir!=nil{for ir.Next(){var p string;ir.Scan(&p);x.Paths=append(x.Paths,p)};ir.Close()};out=append(out,x)};return out,nil}
+func reorderResolvedQueues(res,b,o,t []domain.Queue,cm map[string]ConflictRow)[]domain.Queue{bn,on,tn:=queueNames(b),queueNames(o),queueNames(t);mr:=merge.MergeOrdered("queue-order",bn,on,tn);order:=mr.Items;if len(mr.Conflicts)>0{order=chooseList(cm["queue_order\x00all"],on,tn)};by:=map[string]domain.Queue{};for _,q:=range res{by[q.Name]=q};out:=make([]domain.Queue,0,len(res));seen:=map[string]bool{};for _,n:=range order{if q,ok:=by[n];ok&&!seen[n]{out=append(out,q);seen[n]=true}};for _,q:=range res{if !seen[q.Name]{out=append(out,q)}};return out}
