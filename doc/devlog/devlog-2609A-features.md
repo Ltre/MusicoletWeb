@@ -18,7 +18,7 @@ dev-2609A-GPTCHAT
 
 `main` 未 merge。
 
-容器无法直接解析 `github.com`，因此代码生成/测试在 `/mnt/data/MusicoletWeb-impl` 完成，提交通过 GitHub API 直接推进指定分支。
+开发期间每个可独立验收的小目标都直接提交并 push 到该分支；后续验收以 GitHub 远端真实 branch HEAD 与 GitHub Actions 结果为准，不以本地或工具返回但未落 ref 的临时 SHA 为准。
 
 ---
 
@@ -51,7 +51,17 @@ commit_journal
 secure_settings
 ```
 
-当前 schema 使用 Python 标准库真实 SQLite 执行验证通过，共 36 张表；Queue 重复成员约束实测会触发 `IntegrityError`。
+迁移可靠性在后续复核中继续补强：
+
+- `ensureColumn()` 在 `ALTER TABLE` 前显式关闭 `PRAGMA table_info` rows，避免旧 schema 升级时读游标与 DDL 并存；
+- build-tagged integration test 从缺少 `current_queue_index` 的旧 snapshots schema 启动并验证自动升级；
+- Snapshot immutable / legacy schema migration 均进入真实 SQLite integration suite。
+
+对应小目标结束于：
+
+```text
+f84eb779c02ff491096d549283fb2a8bc1fe391d
+```
 
 ---
 
@@ -80,7 +90,7 @@ secure_settings
 
 ### 3.2 ZIP/manifest 安全补强
 
-第三次复核确认早期 Parser 仍缺长期审计和异常 ZIP 防护，已补：
+已补：
 
 - `parser_runs`：RUNNING / SUCCEEDED / FAILED、parser version、report/error；
 - Procedure parse 失败明确转 `FAILED`，不会永久占住 one-active-procedure 锁；
@@ -92,11 +102,23 @@ secure_settings
 - synthetic encrypted fixture、manifest、Java、unsafe path、duplicate entry 测试；
 - build-tagged SQLite parser integration fixture。
 
-Parser 子目标远端完成于：
+### 3.3 真实 Backup 基准
+
+`internal/musicolet/real_backup_integration_test.go` 保留真实私有 ZIP 的环境变量测试入口，并锁定已完成分析的 2026-08-30 Backup 基准，包括：
 
 ```text
-eea4cca476c1d96c6443ee4a689708d445898314
+89 files
+6653 songs
+54 playlists
+29282 playlist items
+5527 favorites
+14 queues
+15780 queue items
+current queue index = 13
+23 historical period sets
 ```
+
+第二份真实 ZIP 缺失时测试明确 skip，不用 synthetic 数据冒充 V1/V2 真实差异。
 
 ---
 
@@ -126,33 +148,82 @@ refs/heads/main
 
 Server M 对应 change target 和 `has_server_changes`。新 Musicolet 未真正修改同一业务数据时，M 不被清空。
 
+后续新增服务级 integration test，验证 Favorite / Metadata / Playlist / Queue 四类实际 M 均同时满足：
+
+```text
+working state changed
+active server_change exists
+object/song change mark exists
+Git commit non-empty
+refs/heads/main advances
+```
+
+对应提交：
+
+```text
+272a6e25505ff3b1018bc9b98204ba49f2f1d395
+```
+
 ### 4.2 Git/SQLite 崩溃恢复
 
 普通 M：SQLite 先记录 change，Git 成功后回填 commit；启动时 `ReconcileGit()` 补 pending Git audit。
 
 Import：`commit_journal` 使用 PREPARED -> SOURCE_DONE -> GIT_DONE -> DONE，保存 source/main parents 和 commits；`RecoverCommitJournals()` 可恢复异常中断。
 
-### 4.3 Git capability 补齐
+### 4.3 Git capability 与 bare repository 修复
 
-初版只有 commit/ref。第三次复核补齐 roadmap 明确要求：
+Git adapter 已覆盖：
 
 - merge-base；
 - commit -> tree；
-- 临时 `GIT_INDEX_FILE` 三树 `read-tree -m`；
+- 临时 `GIT_INDEX_FILE` 三树 merge；
 - stage 1/2/3 `ls-files -u` conflict index；
 - conflict-free `write-tree`；
 - `commit-tree` + CAS ref update。
 
-测试使用双分支修改 `state.json`，验证 stage 1/2/3 均可读取。
-
-提交：
+真实 GitHub CI 首次运行完整 `go test ./...` 时发现 bare audit repository 下：
 
 ```text
-771ff9156aeecb42d305a9ba56711ba82963d87c
-e8ce096a0d655e0364e5886012b59606e7a506b9
+git read-tree -m ...
+fatal: this operation must be run in a work tree
 ```
 
-`pkg-config --modversion libgit2` 当前仍提示未安装，因此不能声称 git2go/libgit2 CGO link spike 已通过。当前 Git CLI plumbing backend 已满足初期所需 Git primitive，替换边界见 `doc/tech/git-backend-2609A.md`。
+已改为：
+
+```text
+git read-tree -i -m ...
+```
+
+`-i` 只更新隔离 temporary index，不依赖 work tree；本地 bare repo 复现和 GitHub CI 均验证 stage 1/2/3 正常。
+
+修复提交：
+
+```text
+6543bb5d0c19b64ab8c92fe4618f3a34c3fcd556
+```
+
+### 4.4 libgit2/git2go spike 结论
+
+roadmap 要求独立验证 libgit2/git2go。复核确认 git2go 当前稳定 binding 线 `v34` 对应 libgit2 1.5，而当前 libgit2 1.x 已明显向后演进；为满足 roadmap 字面要求而把生产历史 backend 锁回旧 native dependency 并不合理。
+
+因此初期正式决策为：
+
+- 不把 git2go/v34/libgit2 1.5 引入生产依赖；
+- 保留业务层与 `internal/gitstore` 的 adapter 隔离；
+- 当前使用已被真实 CI 覆盖的 Git CLI plumbing backend；
+- 将来只有在存在维护中的、适配当前 libgit2 版本的 Go binding 并完成目标部署环境 CGO/link 验证后才替换 backend。
+
+技术决策已写入：
+
+```text
+doc/tech/git-backend-2609A.md
+```
+
+对应提交：
+
+```text
+9281d42d7bde0cf4f2c9c654a1389ae929a8ee2a
+```
 
 ---
 
@@ -188,6 +259,15 @@ OURS == THEIRS -> 自动接受
 - SERVER DELETE + PHONE MOVE -> 不 conflict；
 - 始终去重。
 
+后续按真实曲库量级复核 `MergeOrdered()`，去掉 incoming ADD 每次重新 `positions(res)` 的重复整表扫描，改为维护 presence set；新增 30,000 ordered-item 回归和 15,780 Queue-item benchmark。当前执行环境 benchmark 约 14 ms/op，仅作基线记录，不设置脆弱硬阈值。
+
+对应提交：
+
+```text
+2177b2270d7ef879f2e7a6963f735ccc8fff7187
+a08b010ac09dc0fbc454e11e82653622ca0480e5
+```
+
 ### 5.4 播放统计
 
 严格按已确认公式：
@@ -222,11 +302,19 @@ resolve           = previous_resolve + server_change + musicolet_change
 
 Procedure API/UI 现在可查看 parser runs、Semantic Diff、Conflict 和 Resolution history。
 
-相关 API 完成于：
+### 5.6 P6/P8 服务级验收
 
-```text
-2495bdcbcb850e9bb3c917639a8ec3c250437cab
-```
+已有 integration tests 锁定：
+
+- active Procedure 时拒绝第二个 ZIP；
+- stale resolution；
+- HEAD / server-change 变化时 final commit 拒绝；
+- cancel 后 Procedure 与上传 ZIP 仍可审计；
+- server delete 遮蔽；
+- path DELETE + ADD；
+- Procedure commit / recovery 主路径。
+
+`./scripts/test.sh` 与 GitHub CI 均已包含 `./internal/app` integration suite，不再漏跑 service-level Procedure tests。
 
 ---
 
@@ -247,11 +335,18 @@ Procedure API/UI 现在可查看 parser runs、Semantic Diff、Conflict 和 Reso
 - Queue rename、global order、atomic reorder/reverse/randomize；
 - Playback State 不参加 Musicolet import conflict。
 
-第三次复核发现 HTTP action switch 和 Web UI 仍停在旧版，已补并立即推送：
+后续增加服务级 Queue acceptance test，锁定：
+
+- 同名但不同 source identity 的 Queue 隔离；
+- 同一 source Queue 直接播放时复用而不重建；
+- 已存在歌曲 add 到 Queue 时移动而不是重复；
+- 删除当前 Queue 后切到下一 Queue 并恢复该 Queue 的记忆点；
+- stop target 随歌曲 move，目标歌曲被删除后 stop target 清除。
+
+对应提交：
 
 ```text
-0c4d98e4  HTTP queue rename/order/reverse/randomize
-4c810ba0  viewed Queue/playback Queue split + Queue ordering UI
+7621a5043f3cae8eb8b76acb38ac06b4060d74c1
 ```
 
 ---
@@ -270,7 +365,7 @@ Procedure API/UI 现在可查看 parser runs、Semantic Diff、Conflict 和 Reso
 - Search
 - Menu
 
-第三次复核补齐初期操作闭环：
+初期操作闭环已包含：
 
 - server-only Metadata 编辑，不写手机原 Metadata；
 - 任意歌曲加入个人 Playlist；
@@ -280,16 +375,24 @@ Procedure API/UI 现在可查看 parser runs、Semantic Diff、Conflict 和 Reso
 - Procedure parser report / Resolution history；
 - Agent token 管理员轮换。
 
-相关提交：
+### 7.1 长列表复核
+
+真实曲库为 6653 首，旧 `songList()` 会一次生成全部 DOM，同时当前视图搜索输入会因 `render()` 重置 query 而失效。已修：
+
+- 当前歌曲视图 search 不再自清空；
+- 每批 250 首追加 DOM；
+- `IntersectionObserver` 提前加载下一批；
+- 不支持 observer 时保留手动继续显示 fallback；
+- `.song` 使用 `content-visibility:auto` / intrinsic size containment，降低不可见行 layout/paint 成本。
+
+对应提交：
 
 ```text
-0987148e004ff3d2ef267fe93a8d3e2b4f5f4fce
-217de9e786486f5a0524906109731cb0e83ac4ce
-4c810ba07e9ef77a12066e846b0dd3f964cf3cb1
-d6f57bb65efede99f92c7bfd0dd42c89c3f115f0
+ff1a0b7fad37560e5f1d789f7e269c319bdbfde7
+3cc489291af6e22a47d83f24a2bc743124536a3c
 ```
 
-像素级 Musicolet 复刻、完整多选、全部排序项、均衡器等按 Remaining Plan 继续，不作为本轮初期主链路阻塞项。
+Folder / Album / Genre 分组与 Artist / Album Artist / Composer 三模式基础视图已存在。像素级 Musicolet 复刻、完整多选、全部排序项、艺术家页完整专辑横向轮播、均衡器等继续属于 Remaining Plan，不作为初期主链路退出条件。
 
 ---
 
@@ -313,20 +416,29 @@ d6f57bb65efede99f92c7bfd0dd42c89c3f115f0
 - `-version`；
 - arm64 build ldflags 注入版本。
 
-Agent/媒体小目标按完成即推策略提交：
+### 8.1 Musicolet MediaStore URI
+
+真实 2026-08-30 Backup 出现 `musicolet://media-store` source。Agent 已增加严格 mapping：
+
+- 固定 host 必须是 `media-store`；
+- 只接受白名单 query keys；
+- `p_id` 必须纯数字；
+- `p_mt` 只允许空或音频类型 `1`；
+- volume 仅接受受限字符；
+- `primary` 映射到 `external_primary`，并兼容 `external` fallback；
+- 最终仍只能形成 `content://media/<volume>/audio/media/<数字ID>`；
+- 不使用 `p_rp` / `p_dn` 拼命令，不提供 shell 执行入口。
+
+实现和测试：
 
 ```text
-6642d758  Hub replacement + range metadata
-97cea243  full media streaming + HTTP Range
-b7af3d53  Range regression
-bdabd246  content media / versioning
-fd24a58e  Agent safety tests
-e4c250fe  arm64 build version
+04d12d22a1a2948fdc367bd91b6ef819c2cd85a1
+733fa12a03655bd038363a3e842fa10883f9dc59
 ```
 
-### 8.1 Agent token 加密
+### 8.2 Agent token 加密
 
-复核发现长期明文 env token 不符合安全要求，已增加：
+已增加：
 
 - `MUSICOLET_MASTER_KEY`；
 - `secure_settings`；
@@ -337,11 +449,31 @@ e4c250fe  arm64 build version
 - 管理员可轮换 token；
 - Linux/Windows config 模板同步。
 
-该小目标远端结束于：
+### 8.3 真机 probe 入口
+
+为避免必须启动完整长连接才能验证 Android 文件/URI 可读性，Agent 新增：
 
 ```text
-f37dc2921e77be055c86186ca6834fdc16f28c08
+-probe <path-or-uri>
 ```
+
+行为：
+
+- 使用与正式请求完全相同的 `readRange()`；
+- 仅读取首 byte；
+- 输出真实 size；
+- 不连接服务端；
+- 不修改手机文件；
+- 空读取结果显式报错，不会 index panic。
+
+对应提交：
+
+```text
+16406af81bb7060851b4488e9bb67960e322e5e9
+8a7c87e8408991067d562eb7f2a63f2f5a8fdfb3
+```
+
+Android/Termux 真机 `/system/bin/content` 权限仍必须在目标手机执行 probe 才能最终验收；服务器或 GitHub runner 无法替代 Android ContentProvider 权限环境。
 
 ---
 
@@ -370,7 +502,7 @@ f37dc2921e77be055c86186ca6834fdc16f28c08
 
 ---
 
-## 10. 启动/测试脚本
+## 10. 启动/测试脚本与真实依赖 CI
 
 Linux / Windows 均参考 `scripts/example`：
 
@@ -388,69 +520,129 @@ Agent：
 scripts/build-agent-arm64.sh
 ```
 
-测试脚本已升级并推送：
-
-```text
-9ba924bde7c1f37f5bc9c4d72a9af809f85cd27b
-```
-
-在正常联网环境执行：
+统一测试入口：
 
 ```bash
 ./scripts/test.sh
 ```
 
-包含：
+现包含：
 
 ```text
 go test ./...
 go vet ./...
-go test -tags=integration ./internal/db ./internal/musicolet
+go test -tags=integration ./internal/db ./internal/musicolet ./internal/app
 node --check web/*.js
 shell syntax checks
 ```
 
----
-
-## 11. 当前执行环境的实际验证
-
-第三次复核后的当前对应源码重新执行：
+之前当前容器无法解析 Go module 网络，因此一度只能用临时 stub 检查纯 Go 类型/逻辑。为消除该边界，已新增 GitHub Actions：
 
 ```text
-go test -modfile=<stub-only-modfile> ./...    PASS
-go vet  -modfile=<stub-only-modfile> ./...    PASS
-node --check web/*.js                        PASS
-bash -n scripts/*.sh                         PASS
-Python sqlite3 executes Go schema             PASS (36 tables)
-Queue duplicate (queue_id,path) constraint    PASS
+.github/workflows/initial-ci.yml
 ```
 
-stub 仅存在于 `/mnt/data/musicolet-stubs`，不提交仓库，只用于当前 DNS 受限容器的类型编译/纯逻辑测试，不冒充真实 dependency integration。
+过程发现并解决：
 
-真实运行过的逻辑测试包括：
+1. `go mod download` 只生成 module `/go.mod` hash，不能满足 package checksum；
+2. 改用 `go mod tidy` 生成完整 dependency graph；
+3. 按 Go 1.23.12 实际 tidy 结果固化 `go.mod` indirect dependencies；
+4. 完整 `go.sum` 从 CI artifact 原始字节生成 Git blob，并校验 blob SHA 后提交；
+5. 随后真实 unit test 暴露 bare Git `read-tree` 错误并修复。
 
-- Song Core conflict；
-- ordered MOVE conflict；
-- SERVER DELETE + PHONE MOVE；
-- 多版本 play-count 105/120/146/164；
-- Resolution ordered patch；
-- Agent symlink escape / file Range / media URI allowlist；
-- stale Agent disconnect replacement；
-- HTTP Range parser；
-- Java serialization canonical parser；
-- unsafe/duplicate ZIP；
-- Git commit/ref/merge-base/stage1/2/3 conflict index；
-- TOTP/session。
+关键 commits：
+
+```text
+91a34f26eab768b9d94b2016aaabc8daf730a9d7  add real-dependency CI
+435aa5024b2c14ff7fcf4d5ea264f7648c4fcdeb  tidy go.mod graph
+ca79e82ef6dab3e2e065b064710e168102890986  exact CI artifact go.sum
+6543bb5d0c19b64ab8c92fe4618f3a34c3fcd556  bare Git merge fix
+```
+
+截至 commit：
+
+```text
+8a7c87e8408991067d562eb7f2a63f2f5a8fdfb3
+```
+
+GitHub Actions `Initial Development CI` run #11 已真实完成并 `success`：
+
+```text
+go mod tidy                              PASS
+go.mod stable check                      PASS
+go test ./...                            PASS
+go vet ./...                             PASS
+go test -tags=integration \
+  ./internal/db ./internal/musicolet \
+  ./internal/app                         PASS
+node --check web/*.js                    PASS
+```
+
+因此真实 `modernc.org/sqlite`、`golang.org/x/crypto` 编译/测试已经完成，不再属于环境未验证项。
 
 ---
 
-## 12. 当前仍必须在外部真实环境完成的验收边界
+## 11. P8 规模与主链路验收状态
 
-以下不是继续写普通业务代码即可在当前容器可信完成：
+已经完成并自动化的部分：
 
-1. 容器 DNS 仍无法解析 `proxy.golang.org`，无法下载真实 `modernc.org/sqlite` / `golang.org/x/crypto`；需要正常联网环境运行 `./scripts/test.sh` 并生成/提交真实 `go.sum`；
-2. 当前没有可可靠访问的原始**加密**私人 Musicolet V1/V2 ZIP，不能伪造 50+ Playlist、Queue/Favorite/统计的真实 E2E 对照；
-3. `content://media/...` 需要目标 Android/Termux 真机验证 `/system/bin/content` 的实际只读权限；
-4. 当前系统未安装 libgit2，git2go/libgit2 CGO link spike 不能伪报通过。
+- 6653 首真实曲库 Parser 结构基准；
+- 54 Playlist / 29282 Playlist item / 14 Queue / 15780 Queue item 基准；
+- 30,000 ordered-item merge regression；
+- 15,780 Queue-item merge benchmark；
+- Snapshot immutability / legacy migration；
+- Server M audit；
+- Queue source identity / playback memory / stop target；
+- Procedure stale / second-upload rejection / head revalidation / cancel audit；
+- Git bare repository merge-base / conflict-index；
+- ZIP safety / manifest / Java canonicalization；
+- Agent range / source allowlist / long-connection replacement；
+- 真实 SQLite / Blowfish dependency CI；
+- 前端 JS syntax；
+- 大曲库 DOM 分批渲染。
 
-除上述真实依赖、私有 ZIP、Android 真机和 libgit2 环境边界外，第三次逐项复核发现的已知初期代码闭环缺口均已实际实现，并遵循“小目标完成后立即推送”的方式进入 `dev-2609A-GPTCHAT`。
+---
+
+## 12. 当前仍需要外部真实输入才能完成的验收边界
+
+重新对照 `Initial Development Plans.md` 后，目前仍不能在仓库/CI 内伪造完成的主要边界只剩：
+
+1. **真实 V1 -> Server M -> 真实 V2 完整 E2E**：当前可访问文件中只有一份真实 2026-08-30 Backup；测试入口已存在，但必须取得第二份实际 Musicolet ZIP 才能验收两版本数量、顺序、统计 delta、冲突和最终 commit。
+2. **Android/Termux 真机读取链路**：`musicolet://media-store` 与普通路径的 allowlist/readRange 已有单测和 CI，但 `/system/bin/content query/read` 对目标 Android 的实际权限只能通过 `musicolet-agent -probe` 在真机完成。
+
+不再列为未完成的旧边界：
+
+- Go dependency / `go.sum`：已由 GitHub CI 实际解决并全绿；
+- SQLite integration：已真实运行；
+- Blowfish package：已真实运行；
+- bare Git merge：已真实 CI 发现问题并修复；
+- git2go/libgit2：已完成技术 spike 决策，当前明确不采用停留在 libgit2 1.5 binding 线的 git2go/v34，生产使用隔离 Git plumbing adapter。
+
+---
+
+## 13. 最近一轮逐项补缺提交
+
+```text
+04d12d22  feat: support Musicolet MediaStore URI mapping
+733fa12a  test: cover Musicolet MediaStore URI mapping
+de673043  fix: close schema cursor before ALTER TABLE
+f84eb779  test: cover snapshot immutability and legacy schema migration
+ff1a0b7f  fix: preserve current-view search and batch song DOM rendering
+3cc48929  perf: contain off-screen song rows
+7621a504  test: lock queue source identity and playback semantics
+272a6e25  test: verify server changes are marked and audited
+2177b227  perf: avoid repeated ordered-list presence scans
+a08b010a  test: add real-scale ordered merge regression
+91a34f26  ci: verify real Go dependencies and integration tests
+7c65a382  test: include service integration suite in test runner
+d324d778  ci: generate complete go.sum before real tests
+435aa502  build: normalize Go module graph
+ca79e82e  fix: replace go.sum with exact CI artifact
+d76ce176  ci: rerun verification with committed module checksums
+6543bb5d  fix: merge trees against bare Git audit repository
+9281d42d  docs: record current Git backend spike decision
+16406af8  feat: add read-only Termux source probe
+8a7c87e8  fix: validate Termux probe read result
+```
+
+后续继续以 `doc/roadmap/master/Initial Development Plans.md` 的退出条件为验收标准；已经进入 Remaining Plan 的像素级 UI、完整排序、多选、均衡器等不倒灌回初期阻塞项。
