@@ -5,9 +5,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/Ltre/MusicoletWeb/internal/db"
 )
+
+func (s *Service) ensureNoPendingGitAudit(ctx context.Context) error {
+	var id int64
+	err := s.Store.DB.QueryRowContext(ctx, "SELECT id FROM server_changes WHERE git_commit IS NULL ORDER BY id LIMIT 1").Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("server change %d has pending Git audit; reconcile it before creating another Server M", id)
+}
 
 // applyChangeLocked keeps the business mutation and its SQLite audit row in one
 // transaction. Git is deliberately finalized after that transaction: a Git
@@ -15,10 +28,19 @@ import (
 // repair without losing the exact business operation/before/after payload.
 // Caller must already hold s.mutation.
 func (s *Service) applyChangeLocked(ctx context.Context, targetType, targetKey, operation string, before, after any, mutate func(*sql.Tx) error, targets ...[2]string) error {
-	b, _ := json.Marshal(before)
-	a, _ := json.Marshal(after)
+	if err := s.ensureNoPendingGitAudit(ctx); err != nil {
+		return err
+	}
+	b, err := json.Marshal(before)
+	if err != nil {
+		return err
+	}
+	a, err := json.Marshal(after)
+	if err != nil {
+		return err
+	}
 	var cid int64
-	err := s.Store.Tx(ctx, func(tx *sql.Tx) error {
+	err = s.Store.Tx(ctx, func(tx *sql.Tx) error {
 		if mutate != nil {
 			if err := mutate(tx); err != nil {
 				return err
@@ -90,6 +112,9 @@ func (s *Service) finalizeServerChangeGitLocked(ctx context.Context, cid int64, 
 	if err != nil {
 		return err
 	}
-	_, err = s.Store.DB.ExecContext(ctx, "UPDATE server_changes SET git_commit=? WHERE id=?", commit, cid)
-	return err
+	r, err := s.Store.DB.ExecContext(ctx, "UPDATE server_changes SET git_commit=? WHERE id=? AND git_commit IS NULL", commit, cid)
+	if err != nil {
+		return err
+	}
+	return db.CheckAffected(r)
 }
