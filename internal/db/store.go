@@ -42,21 +42,29 @@ func ensureColumn(ctx context.Context, db *sql.DB, table, column, definition str
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	found := false
 	for rows.Next() {
 		var cid int
 		var name, typ string
 		var notnull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if name == column {
-			return nil
+			found = true
 		}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
 	}
 	_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition)
 	return err
