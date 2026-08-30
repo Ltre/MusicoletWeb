@@ -31,7 +31,34 @@ func Open(dataDir string) (*Store, error) {
 }
 func (s *Store) Close() error { return s.DB.Close() }
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.DB.ExecContext(ctx, schema)
+	if _, err := s.DB.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	return ensureColumn(ctx, s.DB, "snapshots", "current_queue_index", "INTEGER NOT NULL DEFAULT -1")
+}
+
+func ensureColumn(ctx context.Context, db *sql.DB, table, column, definition string) error {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition)
 	return err
 }
 func (s *Store) Tx(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -98,7 +125,7 @@ func CheckAffected(r sql.Result) error {
 }
 
 const schema = `
-CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, procedure_id INTEGER, state TEXT NOT NULL, parser_version TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, procedure_id INTEGER, state TEXT NOT NULL, parser_version TEXT NOT NULL, created_at INTEGER NOT NULL, current_queue_index INTEGER NOT NULL DEFAULT -1);
 CREATE TABLE IF NOT EXISTS musicolet_versions(id INTEGER PRIMARY KEY AUTOINCREMENT, version_no INTEGER NOT NULL UNIQUE, snapshot_id INTEGER NOT NULL UNIQUE, source_zip_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS import_procedures(id INTEGER PRIMARY KEY AUTOINCREMENT, status TEXT NOT NULL, base_version_id INTEGER, candidate_snapshot_id INTEGER, source_zip_path TEXT NOT NULL, source_zip_sha256 TEXT NOT NULL, last_analyzed_server_head INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, committed_at INTEGER, cancelled_at INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_procedure ON import_procedures((1)) WHERE status IN ('PARSING','REVIEWING','RESOLVING','READY_TO_COMMIT','COMMITTING');
