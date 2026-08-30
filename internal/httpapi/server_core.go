@@ -5,20 +5,22 @@ import (
 	"github.com/Ltre/MusicoletWeb/internal/app"
 	"github.com/Ltre/MusicoletWeb/internal/auth"
 	"github.com/Ltre/MusicoletWeb/internal/config"
+	"github.com/Ltre/MusicoletWeb/internal/securestore"
 	"net/http"
 	"path/filepath"
 )
 
 type Server struct {
-	Cfg  config.Config
-	App  *app.Service
-	Auth *auth.Manager
-	Hub  *agenthub.Hub
-	mux  *http.ServeMux
+	Cfg    config.Config
+	App    *app.Service
+	Auth   *auth.Manager
+	Hub    *agenthub.Hub
+	Secure *securestore.Store
+	mux    *http.ServeMux
 }
 
-func New(cfg config.Config, a *app.Service, am *auth.Manager, h *agenthub.Hub) *Server {
-	s := &Server{Cfg: cfg, App: a, Auth: am, Hub: h, mux: http.NewServeMux()}
+func New(cfg config.Config, a *app.Service, am *auth.Manager, h *agenthub.Hub, sec *securestore.Store) *Server {
+	s := &Server{Cfg: cfg, App: a, Auth: am, Hub: h, Secure: sec, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -44,6 +46,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/song/metadata", s.protectWrite(http.HandlerFunc(s.metadata)))
 	s.mux.Handle("POST /api/song/delete", s.protectWrite(http.HandlerFunc(s.songDelete)))
 	s.mux.Handle("POST /api/song/played", s.protectWrite(http.HandlerFunc(s.songPlayed)))
+	s.mux.Handle("POST /api/admin/agent-token", s.protectWrite(http.HandlerFunc(s.agentTokenRotate)))
 	s.mux.Handle("GET /api/procedure", s.protect(http.HandlerFunc(s.procedureGet)))
 	s.mux.Handle("POST /api/procedure", s.protectWrite(http.HandlerFunc(s.procedureCreate)))
 	s.mux.Handle("POST /api/procedure/action", s.protectWrite(http.HandlerFunc(s.procedureAction)))
