@@ -162,6 +162,10 @@ func parseQueuesJSON(b []byte, s *domain.Snapshot) error {
 		return e
 	}
 	arr, _ := root["S0_PQ"].([]any)
+	current := int(num(root["S0_CPQ"]))
+	if current >= 0 && current < len(arr) {
+		s.CurrentQueueIndex = current
+	}
 	for _, x := range arr {
 		m, _ := x.(map[string]any)
 		q := domain.Queue{Name: str(m["S0_PQ_T"]), CurrentIndex: int(num(m["S0_PQ_CPS"])), PositionMS: num(m["S0_PQ_LKP"])}
