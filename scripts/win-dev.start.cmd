@@ -31,10 +31,14 @@ if not exist "%CONFIG_FILE%" (
   >>"%CONFIG_FILE%" echo MUSICOLET_ADMIN_PASSWORD=
   >>"%CONFIG_FILE%" echo MUSICOLET_ADMIN_TOTP_SECRET=
   >>"%CONFIG_FILE%" echo MUSICOLET_SESSION_KEY=
+  >>"%CONFIG_FILE%" echo MUSICOLET_MASTER_KEY=
+  >>"%CONFIG_FILE%" echo # MUSICOLET_AGENT_TOKEN is bootstrap-only after first successful startup.
   >>"%CONFIG_FILE%" echo MUSICOLET_AGENT_TOKEN=
   >>"%CONFIG_FILE%" echo MUSICOLET_PUBLIC_BASE_URL=
   echo [MusicoletWeb] Created config template: %CONFIG_FILE%
 )
+findstr /b /c:"MUSICOLET_MASTER_KEY=" "%CONFIG_FILE%" >nul 2>&1 || >>"%CONFIG_FILE%" echo MUSICOLET_MASTER_KEY=
+findstr /b /c:"MUSICOLET_AGENT_TOKEN=" "%CONFIG_FILE%" >nul 2>&1 || >>"%CONFIG_FILE%" echo MUSICOLET_AGENT_TOKEN=
 for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%CONFIG_FILE%") do if not "%%A"=="" set "%%A=%%B"
 where go >nul 2>&1
 if errorlevel 1 goto :go_missing
