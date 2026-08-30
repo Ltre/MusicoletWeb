@@ -45,19 +45,6 @@ jobs:
             node --check "$f"
           done
 
-      - name: Build source snapshot for private real-backup E2E
-        run: |
-          go mod vendor
-          tar --exclude=.git --exclude=data -czf /tmp/musicoletweb-source.tar.gz .
-
-      - name: Upload source snapshot
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-snapshot
-          path: /tmp/musicoletweb-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Upload generated go.sum
         if: always()
         uses: actions/upload-artifact@v4
