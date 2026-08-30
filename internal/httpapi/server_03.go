@@ -16,7 +16,7 @@ import (
 )
 
 func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
-	if !agentOK(r, s.Cfg.AgentToken) {
+	if !agentOK(r, os.Getenv("MUSICOLET_AGENT_TOKEN")) {
 		http.Error(w, "unauthorized", 401)
 		return
 	}
@@ -49,7 +49,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
-	if !agentOK(r, s.Cfg.AgentToken) {
+	if !agentOK(r, os.Getenv("MUSICOLET_AGENT_TOKEN")) {
 		http.Error(w, "unauthorized", 401)
 		return
 	}
@@ -61,7 +61,10 @@ func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	errText := r.Header.Get("X-Agent-Error")
-	if !s.Hub.Deliver(id, agenthub.Result{Data: b, Err: errText}) {
+	start, _ := strconv.ParseInt(r.Header.Get("X-Agent-Start"), 10, 64)
+	end, _ := strconv.ParseInt(r.Header.Get("X-Agent-End"), 10, 64)
+	size, _ := strconv.ParseInt(r.Header.Get("X-Agent-Size"), 10, 64)
+	if !s.Hub.Deliver(id, agenthub.Result{Data: b, Err: errText, Start: start, End: end, Size: size}) {
 		http.Error(w, "request not found", 404)
 		return
 	}
@@ -73,19 +76,35 @@ func agentOK(r *http.Request, token string) bool {
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 }
 
-func parseRange(h string) (int64, int64) {
-	if !strings.HasPrefix(h, "bytes=") {
-		return 0, 4<<20 - 1
+type byteRange struct {
+	Start, End int64
+	Requested  bool
+}
+
+func parseRange(h string) (byteRange, error) {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return byteRange{Start: 0, End: -1, Requested: false}, nil
 	}
-	p := strings.Split(strings.TrimPrefix(h, "bytes="), "-")
-	a, _ := strconv.ParseInt(p[0], 10, 64)
-	b := a + (4 << 20) - 1
-	if len(p) > 1 && p[1] != "" {
-		if x, e := strconv.ParseInt(p[1], 10, 64); e == nil && x >= a && x-a < 16<<20 {
-			b = x
+	if !strings.HasPrefix(h, "bytes=") || strings.Contains(strings.TrimPrefix(h, "bytes="), ",") {
+		return byteRange{}, fmt.Errorf("unsupported Range")
+	}
+	p := strings.SplitN(strings.TrimPrefix(h, "bytes="), "-", 2)
+	if len(p) != 2 || p[0] == "" {
+		return byteRange{}, fmt.Errorf("suffix ranges are not supported")
+	}
+	a, e := strconv.ParseInt(p[0], 10, 64)
+	if e != nil || a < 0 {
+		return byteRange{}, fmt.Errorf("invalid Range")
+	}
+	b := int64(-1)
+	if p[1] != "" {
+		b, e = strconv.ParseInt(p[1], 10, 64)
+		if e != nil || b < a {
+			return byteRange{}, fmt.Errorf("invalid Range")
 		}
 	}
-	return a, b
+	return byteRange{Start: a, End: b, Requested: true}, nil
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
