@@ -10,6 +10,7 @@ import (
 	"github.com/Ltre/MusicoletWeb/internal/db"
 	"github.com/Ltre/MusicoletWeb/internal/gitstore"
 	"github.com/Ltre/MusicoletWeb/internal/httpapi"
+	"github.com/Ltre/MusicoletWeb/internal/securestore"
 	"log"
 	"net/http"
 	"os"
@@ -35,10 +36,17 @@ func main() {
 	if e != nil {
 		log.Fatal(e)
 	}
+	sec, e := securestore.New(st.DB, cfg.MasterKey)
+	if e != nil {
+		log.Fatal(e)
+	}
+	if e = sec.Bootstrap(context.Background(), "agent_token", cfg.AgentBootstrapToken); e != nil {
+		log.Fatal(e)
+	}
 	svc := app.New(st, gs, cfg.DataDir)
 	am := auth.New(cfg.AdminUsername, cfg.AdminPassword, cfg.TOTPSecret, cfg.SessionKey)
 	hub := agenthub.New()
-	api := httpapi.New(cfg, svc, am, hub)
+	api := httpapi.New(cfg, svc, am, hub, sec)
 	srv := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.BindHost, cfg.Port), Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	go func() {
 		log.Printf("MusicoletWeb listening on http://%s", srv.Addr)
