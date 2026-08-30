@@ -19,16 +19,19 @@ MUSICOLET_ADMIN_USERNAME=admin
 MUSICOLET_ADMIN_PASSWORD=
 # Base32 secret used by Google Authenticator/TOTP.
 MUSICOLET_ADMIN_TOTP_SECRET=
-# Use long random values for both keys below.
+# Use long random values. MASTER_KEY encrypts sensitive backend settings.
 MUSICOLET_SESSION_KEY=
+MUSICOLET_MASTER_KEY=
+# Bootstrap only: after first successful startup this token is encrypted in SQLite and may be cleared here.
 MUSICOLET_AGENT_TOKEN=
 MUSICOLET_PUBLIC_BASE_URL=
 CONFIGEOF
 chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 echo "[MusicoletWeb] Created config template: $CONFIG_FILE"
 fi
+grep -q '^MUSICOLET_MASTER_KEY=' "$CONFIG_FILE" || printf '\nMUSICOLET_MASTER_KEY=\n' >> "$CONFIG_FILE"
+grep -q '^MUSICOLET_AGENT_TOKEN=' "$CONFIG_FILE" || printf 'MUSICOLET_AGENT_TOKEN=\n' >> "$CONFIG_FILE"
 set -a
-# shellcheck disable=SC1090
 . "$CONFIG_FILE"
 set +a
 command -v go >/dev/null 2>&1 || fail "Go was not found in PATH"
