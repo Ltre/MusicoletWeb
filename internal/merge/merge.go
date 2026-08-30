@@ -83,19 +83,23 @@ func MergeOrdered(key string, base, ours, theirs []string) OrderedResult {
 	}
 	// Start from ours; apply non-conflicting incoming adds/removes/moves. Server removals win over incoming moves.
 	res := append([]string(nil), ours...)
+	present := make(map[string]bool, len(res))
+	for _, x := range res {
+		present[x] = true
+	}
 	for x := range removedT {
 		if _, serverRemoved := removedO[x]; serverRemoved {
 			continue
 		}
 		if op[x] == bp[x] {
 			res = remove(res, x)
+			delete(present, x)
 		}
 	}
 	for i, x := range theirs {
-		if _, inBase := bp[x]; !inBase {
-			if _, exists := positions(res)[x]; !exists {
-				res = insert(res, x, min(i, len(res)))
-			}
+		if _, inBase := bp[x]; !inBase && !present[x] {
+			res = insert(res, x, min(i, len(res)))
+			present[x] = true
 		}
 	}
 	for x, bpos := range bp {
