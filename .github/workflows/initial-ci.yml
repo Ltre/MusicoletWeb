@@ -47,6 +47,7 @@ jobs:
 
       - name: Build source snapshot for private real-backup E2E
         run: |
+          go mod vendor
           tar --exclude=.git --exclude=data -czf /tmp/musicoletweb-source.tar.gz .
 
       - name: Upload source snapshot
