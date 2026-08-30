@@ -53,7 +53,22 @@ bin/musicolet-agent-arm64
 ./bin/musicolet-agent-arm64 -version
 ```
 
-示例：
+真机只读探测某个 Musicolet path/URI，不连接服务端：
+
+```bash
+MUSICOLET_AGENT_ROOTS='/storage/emulated/0' \
+./bin/musicolet-agent-arm64 -probe '/storage/emulated/0/Music/example.mp3'
+```
+
+对于 Backup 中的 MediaStore source 可直接传原始 URI，例如：
+
+```bash
+./bin/musicolet-agent-arm64 -probe 'musicolet://media-store?p_v=primary&p_id=12345&p_mt=1&p_rp=...&p_dn=...'
+```
+
+探测命令严格复用正式 Agent 的 `readRange()` 只读路径，只读取首个 byte 并返回真实文件 size；不会建立 Agent 长连接，也不会写入、删除、移动或修改手机文件。它主要用于 Android/Termux 真机验收 SAF/MediaStore 可读性。
+
+正常连接示例：
 
 ```bash
 MUSICOLET_AGENT_SERVER=https://musicolet.example.com \
@@ -62,7 +77,7 @@ MUSICOLET_AGENT_ROOTS='/storage/emulated/0' \
 ./bin/musicolet-agent-arm64
 ```
 
-Agent 主动建立低成本长期出站连接，不轮询服务端。协议仅允许读取歌曲内容和文件范围，不存在 shell/任意命令执行、文件写入、删除、移动、改名或 Metadata 写入命令。普通路径会在解析 symlink 后再次验证允许根目录；媒体 URI 只接受受限的 `content://media/.../audio/media/<数字ID>`，并通过固定 `/system/bin/content query/read` 调用读取，不把服务端数据拼成 shell 命令。默认要求 HTTPS，只有可信本地开发时才显式使用 `-allow-http`。
+Agent 主动建立低成本长期出站连接，不轮询服务端。协议仅允许读取歌曲内容和文件范围，不存在 shell/任意命令执行、文件写入、删除、移动、改名或 Metadata 写入命令。普通路径会在解析 symlink 后再次验证允许根目录；媒体 URI 只接受受限的 `content://media/.../audio/media/<数字ID>`，Musicolet `musicolet://media-store` URI 只解析固定白名单参数并映射为受限 MediaStore audio URI，再通过固定 `/system/bin/content query/read` 调用读取，不把服务端数据拼成 shell 命令。默认要求 HTTPS，只有可信本地开发时才显式使用 `-allow-http`。
 
 服务端向浏览器支持标准单 Range：Range 请求返回 `206 + Content-Range`；无 Range 时服务端会按块连续向 Agent 拉取直到完整文件结束，而不是只返回首个 4 MiB，因此大 MP3/FLAC 不会被截断。
 
@@ -103,7 +118,7 @@ refs/heads/musicolet-source
 refs/heads/main
 ```
 
-当前 `internal/gitstore` 使用隔离的 Git CLI plumbing backend，提供 blob/tree/commit/ref、merge-base、三树 merge和 stage 1/2/3 conflict-index 能力。业务冲突语义仍由 Go Merge Engine 处理。实现取舍见 `doc/tech/git-backend-2609A.md`。
+当前 `internal/gitstore` 使用隔离的 Git CLI plumbing backend，提供 blob/tree/commit/ref、merge-base、bare repository 三树 merge 和 stage 1/2/3 conflict-index 能力。业务冲突语义仍由 Go Merge Engine 处理。实现取舍见 `doc/tech/git-backend-2609A.md`。
 
 ## 初期 Web 操作
 
@@ -115,19 +130,33 @@ refs/heads/main
 - Favorite、插队、排队尾、停止目标；
 - 个人 Playlist 创建/删除、加歌、移歌和成员位置调整；
 - Import Procedure parser report、Semantic Diff、Conflict、Resolution history；
-- Agent token 管理员轮换。
+- Agent token 管理员轮换；
+- 大曲库歌曲视图按批追加 DOM，并使用 `content-visibility` 降低不可见歌曲行的布局/绘制成本。
 
 ## 测试
 
-正常联网、能够下载 Go module 的环境执行：
+正常联网环境可执行：
 
 ```bash
 ./scripts/test.sh
 ```
 
-脚本包括普通 Go unit tests、`go vet`、使用真实 `modernc.org/sqlite` 的数据库 integration tests、synthetic Musicolet SQLite Backup parser integration test、前端 JavaScript 语法和 shell 脚本语法检查。
+脚本包括普通 Go unit tests、`go vet`、使用真实 `modernc.org/sqlite` 的数据库与 service integration tests、synthetic Musicolet SQLite Backup parser integration test、前端 JavaScript 语法和 shell 脚本语法检查。
 
-仓库不包含用户私人 Musicolet Backup。真实 V1/V2 ZIP 的最终数量/顺序/统计对照必须在持有实际备份的环境执行，不能由 synthetic fixture 替代。
+仓库同时提供 `.github/workflows/initial-ci.yml`。截至 `dev-2609A-GPTCHAT` commit `8a7c87e8408991067d562eb7f2a63f2f5a8fdfb3`，GitHub Actions `Initial Development CI` run #11 已在 Ubuntu + Go 1.23.12 环境实际通过：
+
+```text
+go mod tidy
+ go.mod stable check
+go test ./...
+go vet ./...
+go test -tags=integration ./internal/db ./internal/musicolet ./internal/app
+node --check web/*.js
+```
+
+因此真实 `modernc.org/sqlite`、`golang.org/x/crypto` 依赖已经完成 CI 级编译和测试验证，`go.mod` / `go.sum` 已固化到仓库。
+
+仓库不包含用户私人 Musicolet Backup。真实 V1/V2 ZIP 的最终数量/顺序/统计对照仍必须在持有两份实际备份的环境执行，不能由 synthetic fixture 替代。
 
 ## 设计与开发记录
 
