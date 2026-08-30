@@ -6,87 +6,121 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
 )
 
-type Store struct {
-	Dir string
-	mu  sync.Mutex
+type Store struct{ Dir string }
+
+type IndexConflict struct {
+	Mode  string `json:"mode"`
+	SHA   string `json:"sha"`
+	Path  string `json:"path"`
+	Stage int    `json:"stage"`
 }
 
 func Open(dir string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil { return nil, err }
 	s := &Store{Dir: dir}
-	if _, e := os.Stat(filepath.Join(dir, "HEAD")); os.IsNotExist(e) {
-		if e = os.MkdirAll(dir, 0o700); e != nil {
-			return nil, e
-		}
-		if _, e = s.run("init", "--bare", dir); e != nil {
-			return nil, e
-		}
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); os.IsNotExist(err) {
+		if _, err = s.run(nil, "init", "--bare", dir); err != nil { return nil, err }
 	}
 	return s, nil
 }
-func (s *Store) run(args ...string) (string, error) {
-	c := exec.Command("git", args...)
-	c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=MusicoletWeb", "GIT_AUTHOR_EMAIL=musicoletweb@local", "GIT_COMMITTER_NAME=MusicoletWeb", "GIT_COMMITTER_EMAIL=musicoletweb@local")
-	o, e := c.CombinedOutput()
-	if e != nil {
-		return "", fmt.Errorf("git %v: %w: %s", args, e, o)
-	}
-	return strings.TrimSpace(string(o)), nil
+
+func (s *Store) run(env []string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"--git-dir", s.Dir}, args...)...)
+	if len(env) > 0 { cmd.Env = append(os.Environ(), env...) }
+	out, err := cmd.CombinedOutput()
+	if err != nil { return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out))) }
+	return bytes.TrimSpace(out), nil
 }
+
 func (s *Store) Head(ref string) string {
-	o, e := s.run("--git-dir", s.Dir, "rev-parse", "--verify", ref)
-	if e != nil {
-		return ""
-	}
-	return o
-}
-func (s *Store) CommitJSON(ref, msg string, data []byte, parents ...string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cmd := exec.Command("git", "--git-dir", s.Dir, "hash-object", "-w", "--stdin")
-	cmd.Stdin = bytes.NewReader(data)
-	o, e := cmd.CombinedOutput()
-	if e != nil {
-		return "", e
-	}
-	blob := strings.TrimSpace(string(o))
-	treeSpec := fmt.Sprintf("100644 blob %s\tstate.json\n", blob)
-	cmd = exec.Command("git", "--git-dir", s.Dir, "mktree")
-	cmd.Stdin = strings.NewReader(treeSpec)
-	o, e = cmd.CombinedOutput()
-	if e != nil {
-		return "", e
-	}
-	tree := strings.TrimSpace(string(o))
-	args := []string{"--git-dir", s.Dir, "commit-tree", tree, "-m", msg}
-	for _, p := range parents {
-		if p != "" {
-			args = append(args, "-p", p)
-		}
-	}
-	commit, e := s.run(args...)
-	if e != nil {
-		return "", e
-	}
-	old := s.Head(ref)
-	up := []string{"--git-dir", s.Dir, "update-ref", ref, commit}
-	if old != "" {
-		up = append(up, old)
-	}
-	if _, e = s.run(up...); e != nil {
-		return "", e
-	}
-	return commit, nil
+	out, err := s.run(nil, "rev-parse", "--verify", ref)
+	if err != nil { return "" }
+	return strings.TrimSpace(string(out))
 }
 
 func (s *Store) ReadState(ref string) ([]byte, error) {
-	c := exec.Command("git", "--git-dir", s.Dir, "show", ref+":state.json")
-	o, e := c.Output()
-	if e != nil {
-		return nil, e
+	return s.run(nil, "show", ref+":state.json")
+}
+
+func (s *Store) CommitJSON(ref, msg string, data []byte, parents ...string) (string, error) {
+	blob, err := s.hashObject(data); if err != nil { return "", err }
+	treeInput := fmt.Sprintf("100644 blob %s\tstate.json\n", blob)
+	cmd := exec.Command("git", "--git-dir", s.Dir, "mktree")
+	cmd.Stdin = strings.NewReader(treeInput)
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=MusicoletWeb", "GIT_AUTHOR_EMAIL=musicolet@localhost", "GIT_COMMITTER_NAME=MusicoletWeb", "GIT_COMMITTER_EMAIL=musicolet@localhost")
+	out, err := cmd.CombinedOutput(); if err != nil { return "", fmt.Errorf("git mktree: %w: %s", err, out) }
+	return s.CommitTree(ref, msg, strings.TrimSpace(string(out)), parents...)
+}
+
+func (s *Store) hashObject(data []byte) (string, error) {
+	cmd := exec.Command("git", "--git-dir", s.Dir, "hash-object", "-w", "--stdin")
+	cmd.Stdin = bytes.NewReader(data)
+	out, err := cmd.CombinedOutput(); if err != nil { return "", fmt.Errorf("git hash-object: %w: %s", err, out) }
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (s *Store) MergeBase(a, b string) (string, error) {
+	out, err := s.run(nil, "merge-base", a, b)
+	if err != nil { return "", err }
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (s *Store) Tree(commit string) (string, error) {
+	out, err := s.run(nil, "rev-parse", commit+"^{tree}")
+	if err != nil { return "", err }
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (s *Store) mergeIndex(base, ours, theirs string) (string, []IndexConflict, error) {
+	idx, err := os.CreateTemp("", "musicolet-git-index-*")
+	if err != nil { return "", nil, err }
+	idxPath := idx.Name(); _ = idx.Close(); _ = os.Remove(idxPath); defer os.Remove(idxPath)
+	env := []string{"GIT_INDEX_FILE=" + idxPath}
+	if _, err = s.run(env, "read-tree", "-m", base, ours, theirs); err != nil { return "", nil, err }
+	out, err := s.run(env, "ls-files", "-u")
+	if err != nil { return "", nil, err }
+	var conflicts []IndexConflict
+	if strings.TrimSpace(string(out)) != "" {
+		for _, line := range strings.Split(string(out), "\n") {
+			parts := strings.Fields(line)
+			if len(parts) < 4 { continue }
+			stage, _ := strconv.Atoi(parts[2])
+			path := strings.Join(parts[3:], " ")
+			conflicts = append(conflicts, IndexConflict{Mode: parts[0], SHA: parts[1], Stage: stage, Path: path})
+		}
+		return "", conflicts, nil
 	}
-	return o, nil
+	tree, err := s.run(env, "write-tree")
+	if err != nil { return "", nil, err }
+	return strings.TrimSpace(string(tree)), nil, nil
+}
+
+func (s *Store) MergeTrees(base, ours, theirs string) (string, []IndexConflict, error) {
+	bt, err := s.Tree(base); if err != nil { return "", nil, err }
+	ot, err := s.Tree(ours); if err != nil { return "", nil, err }
+	tt, err := s.Tree(theirs); if err != nil { return "", nil, err }
+	return s.mergeIndex(bt, ot, tt)
+}
+
+func (s *Store) ConflictIndex(base, ours, theirs string) ([]IndexConflict, error) {
+	_, c, err := s.MergeTrees(base, ours, theirs)
+	return c, err
+}
+
+func (s *Store) CommitTree(ref, msg, tree string, parents ...string) (string, error) {
+	args := []string{"commit-tree", tree}
+	for _, p := range parents { if strings.TrimSpace(p) != "" { args = append(args, "-p", p) } }
+	args = append(args, "-m", msg)
+	env := []string{"GIT_AUTHOR_NAME=MusicoletWeb", "GIT_AUTHOR_EMAIL=musicolet@localhost", "GIT_COMMITTER_NAME=MusicoletWeb", "GIT_COMMITTER_EMAIL=musicolet@localhost"}
+	out, err := s.run(env, args...); if err != nil { return "", err }
+	commit := strings.TrimSpace(string(out))
+	old := s.Head(ref)
+	update := []string{"update-ref", ref, commit}
+	if old != "" { update = append(update, old) }
+	if _, err = s.run(nil, update...); err != nil { return "", err }
+	return commit, nil
 }
