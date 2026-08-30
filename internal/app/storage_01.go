@@ -10,196 +10,24 @@ import (
 )
 
 func insertSnapshot(ctx context.Context, tx *sql.Tx, sid int64, s domain.Snapshot) error {
-	for _, p := range merge.SortedKeys(s.Songs) {
-		x := s.Songs[p]
-		if _, e := tx.ExecContext(ctx, "INSERT INTO snapshot_songs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", sid, x.Path, x.Title, x.Artist, x.Album, x.AlbumArtist, x.Composer, x.Genre, x.Lyrics, x.TrackNo, x.DiscNo, x.Year, x.Comment, x.DurationMS, x.FileName, x.Folder, x.ModifiedMS, x.AddedMS, x.LastPlayedMS, x.PlayCount, string(x.Raw)); e != nil {
-			return e
-		}
-	}
-	for i, p := range s.Playlists {
-		if _, e := tx.ExecContext(ctx, "INSERT INTO snapshot_playlists VALUES(?,?,?)", sid, p.Name, i); e != nil {
-			return e
-		}
-		for j, path := range p.Paths {
-			_, _ = tx.ExecContext(ctx, "INSERT OR IGNORE INTO snapshot_playlist_items VALUES(?,?,?,?)", sid, p.Name, path, j)
-		}
-	}
-	for i, q := range s.Queues {
-		_, _ = tx.ExecContext(ctx, "INSERT INTO snapshot_queues VALUES(?,?,?,?,?)", sid, q.Name, i, q.CurrentIndex, q.PositionMS)
-		for j, path := range q.Paths {
-			_, _ = tx.ExecContext(ctx, "INSERT OR IGNORE INTO snapshot_queue_items VALUES(?,?,?,?)", sid, q.Name, path, j)
-		}
-	}
-	for p := range s.Favorites {
-		_, _ = tx.ExecContext(ctx, "INSERT OR IGNORE INTO snapshot_favorites VALUES(?,?)", sid, p)
-	}
-	for k, m := range s.PeriodCounts {
-		for p, c := range m {
-			_, _ = tx.ExecContext(ctx, "INSERT OR REPLACE INTO snapshot_period_counts VALUES(?,?,?,?)", sid, k, p, c)
-		}
-	}
-	for name, text := range s.RawFiles {
-		_, _ = tx.ExecContext(ctx, "INSERT OR REPLACE INTO snapshot_raw_files VALUES(?,?,?)", sid, name, text)
-	}
+	for _,p:=range merge.SortedKeys(s.Songs){x:=s.Songs[p];if _,e:=tx.ExecContext(ctx,"INSERT INTO snapshot_songs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",sid,x.Path,x.Title,x.Artist,x.Album,x.AlbumArtist,x.Composer,x.Genre,x.Lyrics,x.TrackNo,x.DiscNo,x.Year,x.Comment,x.DurationMS,x.FileName,x.Folder,x.ModifiedMS,x.AddedMS,x.LastPlayedMS,x.PlayCount,string(x.Raw));e!=nil{return e}}
+	for i,p:=range s.Playlists{if _,e:=tx.ExecContext(ctx,"INSERT INTO snapshot_playlists VALUES(?,?,?)",sid,p.Name,i);e!=nil{return e};for j,path:=range p.Paths{_,_=tx.ExecContext(ctx,"INSERT OR IGNORE INTO snapshot_playlist_items VALUES(?,?,?,?)",sid,p.Name,path,j)}}
+	for i,q:=range s.Queues{_,_=tx.ExecContext(ctx,"INSERT INTO snapshot_queues VALUES(?,?,?,?,?)",sid,q.Name,i,q.CurrentIndex,q.PositionMS);for j,path:=range q.Paths{_,_=tx.ExecContext(ctx,"INSERT OR IGNORE INTO snapshot_queue_items VALUES(?,?,?,?)",sid,q.Name,path,j)}}
+	for p:=range s.Favorites{_,_=tx.ExecContext(ctx,"INSERT OR IGNORE INTO snapshot_favorites VALUES(?,?)",sid,p)}
+	for k,m:=range s.PeriodCounts{for p,c:=range m{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO snapshot_period_counts VALUES(?,?,?,?)",sid,k,p,c)}}
+	for p,c:=range s.CurrentCounts{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO snapshot_current_counts VALUES(?,?,?,?,?)",sid,p,c.Week,c.Month,c.Year)}
+	for k,v:=range s.Settings{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO snapshot_settings VALUES(?,?,?)",sid,k,string(v))}
+	for name,text:=range s.RawFiles{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO snapshot_raw_files VALUES(?,?,?)",sid,name,text)}
 	return nil
 }
 
-func replaceWorking(ctx context.Context, tx *sql.Tx, s domain.Snapshot) error {
-	var states = map[string][2]any{}
-	rows, _ := tx.QueryContext(ctx, "SELECT q.name,COALESCE(ps.current_path,''),COALESCE(ps.position_ms,0),COALESCE(ps.stop_path,'') FROM working_queues q LEFT JOIN queue_playback_state ps ON ps.queue_id=q.id")
-	type st struct {
-		p    string
-		ms   int64
-		stop string
-	}
-	sm := map[string]st{}
-	if rows != nil {
-		for rows.Next() {
-			var n string
-			var x st
-			rows.Scan(&n, &x.p, &x.ms, &x.stop)
-			sm[n] = x
-		}
-		rows.Close()
-	}
-	_ = states
-	for _, t := range []string{"working_playlist_items", "working_playlists", "working_queue_items", "queue_playback_state", "working_queues", "working_favorites", "working_period_counts", "working_songs"} {
-		if _, e := tx.ExecContext(ctx, "DELETE FROM "+t); e != nil {
-			return e
-		}
-	}
-	for _, p := range merge.SortedKeys(s.Songs) {
-		x := s.Songs[p]
-		_, e := tx.ExecContext(ctx, "INSERT INTO working_songs(path,title,artist,album,album_artist,composer,genre,lyrics,track_no,disc_no,year,comment,duration_ms,file_name,folder,modified_ms,added_ms,last_played_ms,play_count,raw_json,has_server_changes,deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)", x.Path, x.Title, x.Artist, x.Album, x.AlbumArtist, x.Composer, x.Genre, x.Lyrics, x.TrackNo, x.DiscNo, x.Year, x.Comment, x.DurationMS, x.FileName, x.Folder, x.ModifiedMS, x.AddedMS, x.LastPlayedMS, x.PlayCount, string(x.Raw), boolInt(x.HasServerChanges))
-		if e != nil {
-			return e
-		}
-	}
-	for _, p := range s.Playlists {
-		r, e := tx.ExecContext(ctx, "INSERT INTO working_playlists(name) VALUES(?)", p.Name)
-		if e != nil {
-			return e
-		}
-		id, _ := r.LastInsertId()
-		for i, path := range p.Paths {
-			_, _ = tx.ExecContext(ctx, "INSERT OR IGNORE INTO working_playlist_items VALUES(?,?,?)", id, path, i)
-		}
-	}
-	for i, q := range s.Queues {
-		r, e := tx.ExecContext(ctx, "INSERT INTO working_queues(name,sort_position,source_type,source_key) VALUES(?,?,?,?)", q.Name, i, null(q.SourceType), null(q.SourceKey))
-		if e != nil {
-			return e
-		}
-		qid, _ := r.LastInsertId()
-		for j, path := range q.Paths {
-			_, _ = tx.ExecContext(ctx, "INSERT OR IGNORE INTO working_queue_items VALUES(?,?,?)", qid, path, j)
-		}
-		x := sm[q.Name]
-		if x.p == "" && q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Paths) {
-			x.p = q.Paths[q.CurrentIndex]
-			x.ms = q.PositionMS
-		}
-		_, _ = tx.ExecContext(ctx, "INSERT INTO queue_playback_state(queue_id,current_path,position_ms,stop_path,updated_at) VALUES(?,?,?,?,?)", qid, null(x.p), x.ms, null(x.stop), db.NowMS())
-	}
-	for p := range s.Favorites {
-		_, _ = tx.ExecContext(ctx, "INSERT OR IGNORE INTO working_favorites VALUES(?)", p)
-	}
-	for k, m := range s.PeriodCounts {
-		for p, c := range m {
-			_, _ = tx.ExecContext(ctx, "INSERT OR REPLACE INTO working_period_counts(period_key,path,count,base_import_count,last_resolve_count) VALUES(?,?,?,?,?)", k, p, c, c, c)
-		}
-	}
-	return nil
-}
-
-// Helpers.
-
-func ptr(m map[string]domain.Song, k string) *domain.Song {
-	v, ok := m[k]
-	if !ok {
-		return nil
-	}
-	return &v
-}
-
-func songOp(b, t *domain.Song) string {
-	if b == nil && t != nil {
-		return "ADD"
-	}
-	if b != nil && t == nil {
-		return "DELETE"
-	}
-	if b != nil && t != nil && b.CoreKey() != t.CoreKey() {
-		return "MODIFY"
-	}
-	return "UNCHANGED"
-}
-
-func unionSongKeys(ms ...map[string]domain.Song) []string {
-	m := map[string]bool{}
-	for _, x := range ms {
-		for k := range x {
-			m[k] = true
-		}
-	}
-	r := make([]string, 0, len(m))
-	for k := range m {
-		r = append(r, k)
-	}
-	sort.Strings(r)
-	return r
-}
-
-func unionListKeys(ms ...map[string][]string) []string {
-	m := map[string]bool{}
-	for _, x := range ms {
-		for k := range x {
-			m[k] = true
-		}
-	}
-	r := make([]string, 0, len(m))
-	for k := range m {
-		r = append(r, k)
-	}
-	sort.Strings(r)
-	return r
-}
-
-func listMap(s domain.Snapshot, typ string) map[string][]string {
-	m := map[string][]string{}
-	if typ == "playlist" {
-		for _, x := range s.Playlists {
-			m[x.Name] = x.Paths
-		}
-	} else {
-		for _, x := range s.Queues {
-			m[x.Name] = x.Paths
-		}
-	}
-	return m
-}
-
-func equal(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func insertDiff(ctx context.Context, tx *sql.Tx, pid int64, typ, key, op string, b, o, t any, c bool) (int64, error) {
-	r, e := tx.ExecContext(ctx, "INSERT INTO semantic_diffs(procedure_id,target_type,target_key,operation,base_json,ours_json,theirs_json,conflict) VALUES(?,?,?,?,?,?,?,?)", pid, typ, key, op, merge.JSON(b), merge.JSON(o), merge.JSON(t), boolInt(c))
-	if e != nil {
-		return 0, e
-	}
-	return r.LastInsertId()
-}
-
-func insertConflict(ctx context.Context, tx *sql.Tx, pid, did int64, typ, key string, b, o, t any) error {
-	_, e := tx.ExecContext(ctx, "INSERT INTO merge_conflicts(procedure_id,diff_id,target_type,target_key,base_json,ours_json,theirs_json,updated_at) VALUES(?,?,?,?,?,?,?,?)", pid, did, typ, key, merge.JSON(b), merge.JSON(o), merge.JSON(t), db.NowMS())
-	return e
-}
+func replaceWorking(ctx context.Context,tx *sql.Tx,s domain.Snapshot)error{rows,_:=tx.QueryContext(ctx,"SELECT q.name,COALESCE(ps.current_path,''),COALESCE(ps.position_ms,0),COALESCE(ps.stop_path,'') FROM working_queues q LEFT JOIN queue_playback_state ps ON ps.queue_id=q.id");type st struct{p string;ms int64;stop string};sm:=map[string]st{};if rows!=nil{for rows.Next(){var n string;var x st;rows.Scan(&n,&x.p,&x.ms,&x.stop);sm[n]=x};rows.Close()};for _,t:=range []string{"working_playlist_items","working_playlists","working_queue_items","queue_playback_state","working_queues","working_favorites","working_settings","working_period_counts","working_current_counts","working_songs"}{if _,e:=tx.ExecContext(ctx,"DELETE FROM "+t);e!=nil{return e}};for _,p:=range merge.SortedKeys(s.Songs){x:=s.Songs[p];_,e:=tx.ExecContext(ctx,"INSERT INTO working_songs(path,title,artist,album,album_artist,composer,genre,lyrics,track_no,disc_no,year,comment,duration_ms,file_name,folder,modified_ms,added_ms,last_played_ms,play_count,raw_json,has_server_changes,deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",x.Path,x.Title,x.Artist,x.Album,x.AlbumArtist,x.Composer,x.Genre,x.Lyrics,x.TrackNo,x.DiscNo,x.Year,x.Comment,x.DurationMS,x.FileName,x.Folder,x.ModifiedMS,x.AddedMS,x.LastPlayedMS,x.PlayCount,string(x.Raw),boolInt(x.HasServerChanges));if e!=nil{return e}};for _,p:=range s.Playlists{r,e:=tx.ExecContext(ctx,"INSERT INTO working_playlists(name) VALUES(?)",p.Name);if e!=nil{return e};id,_:=r.LastInsertId();for i,path:=range p.Paths{_,_=tx.ExecContext(ctx,"INSERT OR IGNORE INTO working_playlist_items VALUES(?,?,?)",id,path,i)}};for i,q:=range s.Queues{r,e:=tx.ExecContext(ctx,"INSERT INTO working_queues(name,sort_position,source_type,source_key) VALUES(?,?,?,?)",q.Name,i,null(q.SourceType),null(q.SourceKey));if e!=nil{return e};qid,_:=r.LastInsertId();for j,path:=range q.Paths{_,_=tx.ExecContext(ctx,"INSERT OR IGNORE INTO working_queue_items VALUES(?,?,?)",qid,path,j)};x:=sm[q.Name];if x.p==""&&q.CurrentIndex>=0&&q.CurrentIndex<len(q.Paths){x.p=q.Paths[q.CurrentIndex];x.ms=q.PositionMS};_,_=tx.ExecContext(ctx,"INSERT INTO queue_playback_state(queue_id,current_path,position_ms,stop_path,updated_at) VALUES(?,?,?,?,?)",qid,null(x.p),x.ms,null(x.stop),db.NowMS())};for p:=range s.Favorites{_,_=tx.ExecContext(ctx,"INSERT OR IGNORE INTO working_favorites VALUES(?)",p)};for k,v:=range s.Settings{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO working_settings VALUES(?,?)",k,string(v))};for k,m:=range s.PeriodCounts{for p,c:=range m{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO working_period_counts(period_key,path,count,base_import_count,last_resolve_count) VALUES(?,?,?,?,?)",k,p,c,c,c)}};for p,c:=range s.CurrentCounts{_,_=tx.ExecContext(ctx,"INSERT OR REPLACE INTO working_current_counts(path,week_count,month_count,year_count) VALUES(?,?,?,?)",p,c.Week,c.Month,c.Year)};return nil}
+func ptr(m map[string]domain.Song,k string)*domain.Song{v,ok:=m[k];if !ok{return nil};return &v}
+func songOp(b,t *domain.Song)string{if b==nil&&t!=nil{return "ADD"};if b!=nil&&t==nil{return "DELETE"};if b!=nil&&t!=nil&&b.CoreKey()!=t.CoreKey(){return "MODIFY"};return "UNCHANGED"}
+func unionSongKeys(ms ...map[string]domain.Song)[]string{m:=map[string]bool{};for _,x:=range ms{for k:=range x{m[k]=true}};r:=make([]string,0,len(m));for k:=range m{r=append(r,k)};sort.Strings(r);return r}
+func unionListKeys(ms ...map[string][]string)[]string{m:=map[string]bool{};for _,x:=range ms{for k:=range x{m[k]=true}};r:=make([]string,0,len(m));for k:=range m{r=append(r,k)};sort.Strings(r);return r}
+func listMap(s domain.Snapshot,typ string)map[string][]string{m:=map[string][]string{};if typ=="playlist"{for _,x:=range s.Playlists{m[x.Name]=x.Paths}}else{for _,x:=range s.Queues{m[x.Name]=x.Paths}};return m}
+func queueNames(a []domain.Queue)[]string{r:=make([]string,0,len(a));for _,q:=range a{r=append(r,q.Name)};return r}
+func equal(a,b []string)bool{if len(a)!=len(b){return false};for i:=range a{if a[i]!=b[i]{return false}};return true}
+func insertDiff(ctx context.Context,tx *sql.Tx,pid int64,typ,key,op string,b,o,t any,c bool)(int64,error){r,e:=tx.ExecContext(ctx,"INSERT INTO semantic_diffs(procedure_id,target_type,target_key,operation,base_json,ours_json,theirs_json,conflict) VALUES(?,?,?,?,?,?,?,?)",pid,typ,key,op,merge.JSON(b),merge.JSON(o),merge.JSON(t),boolInt(c));if e!=nil{return 0,e};return r.LastInsertId()}
+func insertConflict(ctx context.Context,tx *sql.Tx,pid,did int64,typ,key string,b,o,t any)error{_,e:=tx.ExecContext(ctx,"INSERT INTO merge_conflicts(procedure_id,diff_id,target_type,target_key,base_json,ours_json,theirs_json,updated_at) VALUES(?,?,?,?,?,?,?,?)",pid,did,typ,key,merge.JSON(b),merge.JSON(o),merge.JSON(t),db.NowMS());return e}
