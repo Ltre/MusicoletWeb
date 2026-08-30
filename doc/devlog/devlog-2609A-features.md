@@ -646,3 +646,151 @@ d76ce176  ci: rerun verification with committed module checksums
 ```
 
 后续继续以 `doc/roadmap/master/Initial Development Plans.md` 的退出条件为验收标准；已经进入 Remaining Plan 的像素级 UI、完整排序、多选、均衡器等不倒灌回初期阻塞项。
+
+---
+
+## 14. 2026-08-30 最终收尾复核
+
+本节覆盖后续多轮逐项验收；若与前文较早的“截至 commit / CI run”描述冲突，以本节为准。
+
+### 14.1 P3/P6 原子性、状态机与恢复补强
+
+后续复核发现并修复了多处“正常路径可用，但故障路径可能留下不可信状态”的问题：
+
+- Song 类 Server M（Favorite / Metadata / Delete / PlayCount）改为 working mutation + `server_changes` / `change_targets` / change mark 同一 SQLite transaction；
+- Queue / Playlist Server M 同样原子化，并使用 SQLite trigger 故障注入验证 audit INSERT 失败时 working state 不泄漏；
+- 通用 `RecordChange()` 收敛到同一原子 helper；
+- Import journal 最终落库中 Candidate -> Version、working replacement、Server M active 更新、import audit、对象 change mark、Procedure `COMMITTED`、journal `DONE` 任一步失败都会整笔 rollback；
+- Procedure 只有 `READY_TO_COMMIT` 可进入 commit，`CANCELLED / FAILED / COMMITTED / COMMITTING` 不得被 refresh/resolve/commit 重新复活；
+- 最后一个 conflict resolution 完成后状态真正进入 `READY_TO_COMMIT`；
+- crash recovery 只有在当前 Git HEAD 的 state 与 parent 都精确匹配 journal 预期时才认领，禁止把无关 HEAD 当成本次 import；
+- Git adapter 对已有 ref 要求新 commit 第一 parent 等于当前 HEAD，并使用 CAS `update-ref`；
+- 服务启动顺序已正式接通 `RecoverCommitJournals()` -> `ReconcileGit()` -> HTTP listen，恢复失败拒绝对外服务；
+- Server M 出现 `git_commit=NULL` 后，在精确恢复前禁止继续产生新的 Server M；合法“Git 已写、SQLite 尚未回填 SHA”场景直接认领原 HEAD，不重复制造 reconcile commit，多条遗留 pending audit 则 fail closed。
+
+关键提交：
+
+```text
+a3b4f3ab  fix: atomically audit song server changes
+c13c31eb  fix: atomically audit queue and playlist changes
+00164ebe  refactor: route RecordChange through atomic audit
+dcd4aa81  test: cover pending Git audit reconciliation
+85380592  fix: make import journal finalization fully atomic
+5a678990  fix: enforce import Procedure state transitions
+f05f1091  fix: validate Git heads during import journal recovery
+a8888ff2  fix: enforce CAS parent on Git audit refs
+ae778c77  fix: recover audit journals before serving traffic
+6c5fd807  fix: block new mutations while Git audit is pending
+```
+
+### 14.2 P6 Resolution / stale 审计补齐
+
+- 手动 conflict resolution 从单行 prompt 升级成完整编辑面板，展示 BASE / OURS / THEIRS，可编辑最终 JSON / ordered path array，并在提交前校验；
+- `conflict_resolutions` 的 decision-time BASE / OURS / THEIRS / RESULT 现在通过历史 API 返回；
+- stale conflict UI 明确展示旧 Resolution、当时 Server Head、当时 OURS、当前 OURS、当前 THEIRS、旧 RESULT / Patch；
+- 旧“保留 OURS”不会被重新解释为后来已经变化的当前 OURS。
+
+关键提交：
+
+```text
+1ab65d74  feat: add full manual conflict result editor
+da215c73  feat: expose stale conflict resolution snapshots
+```
+
+### 14.3 P7 播放与 Agent Hub 补齐
+
+- Agent disconnect / replacement 会立即失败属于旧 generation 的 pending read，不再僵等固定 timeout；
+- Hub timeout 可配置并有 cancel / disconnect / replacement / timeout 回归；
+- Now Playing 读取 `/api/health` 的 `agent_online`，离线时直接提示不可播放；媒体读取中途失败也有明确 toast；
+- HTTP media bridge 自动化覆盖完整文件多分块、Range 206 / Content-Range、Agent offline 503；
+- Agent 返回媒体块严格验证 Start / End / Size 与实际 Data 长度；首块协议错误在响应头发出前返回 502，后续块异常立即中止流；
+- Now Playing 增加 `-10s / +10s`，seek 后立即保存 Queue progress。
+
+关键提交：
+
+```text
+eaa96cd1  fix: fail pending Agent reads on disconnect
+705c34b1  feat: surface Agent offline playback state
+76cf9a18  test: cover HTTP media bridge through Agent Hub
+a21c0001  feat: add playback skip controls
+c21985a1  fix: validate Agent media chunk integrity
+```
+
+### 14.4 P4/P5 Web 语义补齐
+
+- 运行时“随机”不再只是布尔 flag：next 随机选择 Queue 内其它歌曲，但不改变 Queue 内容；会话内保留随机 back/forward history；
+- Playlist 详情增加“乱序播放”入口：首次来源 Queue 随机化，已有来源 Queue 复用且不重新洗牌；
+- 公共 Song List 增加正在播放项状态高亮；
+- Queue 永久随机化与运行时 shuffle 保持两套独立语义。
+
+关键提交：
+
+```text
+8355e068  fix: implement runtime shuffle navigation
+a428d117  feat: add playlist shuffle-play entry
+31b59f54  feat: mark the active song in shared song lists
+```
+
+### 14.5 P2 / Procedure 审计 fail-closed
+
+- `original_zip` / `decrypted_dir` 的 `import_artifacts` 写入不再吞错；审计失败会使 Procedure / parser run 正确转 FAILED，同时磁盘原 ZIP 仍保留；
+- `AnalyzeProcedure()` 不再吞 ServerHead、旧 Conflict、stale hit、unresolved count 等数据库错误；分析末尾状态写入失败时，本轮 diff/conflict 重建事务整体 rollback；
+- `GET /api/procedure` 不再吞 Refresh、Diff、Conflict、Resolution history、Parser run 读取错误，避免返回表面 200 但内容残缺的审计页面；
+- `internal/httpapi` integration tests 已进入 GitHub CI 与 `./scripts/test.sh`。
+
+关键提交：
+
+```text
+fd9440c8  fix: fail Procedure when artifact audit persistence fails
+36a568b0  fix: make Procedure analysis fail closed
+519ac68b  fix: fail Procedure API on incomplete audit reads
+5ce57dab  test: align local integration suite with CI
+```
+
+### 14.6 P8 规模、认证与 CI 最终状态
+
+新增合成真实量级 integration baseline：
+
+```text
+2000 songs
+55 playlists x 400 = 22000 playlist items
+8 queues x 700 = 5600 queue items
+V1 working install -> Candidate Snapshot -> full Semantic Diff / Analyze
+```
+
+设置 60 秒宽松阈值，仅用于防数量级性能退化，不作为微基准。
+
+认证与生产反代补强：
+
+- Cloudflare/Nginx HTTPS -> Go HTTP 情况下识别 `X-Forwarded-Proto=https`，Session / CSRF Cookie 正确增加 `Secure`；
+- 路由级测试锁死 library / playback / procedure / media / mutation 匿名返回 401；
+- 合法 Session 缺 CSRF 的写请求返回 403；
+- 仅明确 public route 保持匿名。
+
+关键提交：
+
+```text
+9410c95e  test: add initial-plan scale integration baseline
+eab41104  fix: secure cookies behind HTTPS reverse proxy
+b210035e  test: lock down protected API route boundaries
+```
+
+GitHub Actions 已确认：
+
+```text
+run #39 / 6c5fd807  success
+run #40 / 5ce57dab  success
+```
+
+因此截至本节，最新代码链上的 Go unit tests、Go vet、SQLite/Musicolet/App/HTTP API integration tests、JavaScript syntax 和启动脚本 shell syntax 均已通过真实 GitHub CI。
+
+### 14.7 初期计划最终收口判断
+
+重新逐项对照 `doc/roadmap/master/Initial Development Plans.md` P0～P8 后，**目前未再发现需要在仓库内继续开发才能满足初期退出条件的明确代码缺口**。已经属于 `Remaining Development Plans.md` 的像素级 UI、完整排序、多选、分享中心、裁剪器、均衡器、完整缓存管理、标签偏好 UI 等不再倒灌为初期阻塞任务。
+
+尚不能宣称满足 P8 “冻结条件”的只有两个外部验收项：
+
+1. **第二份真实 Musicolet ZIP**：`internal/app/real_import_integration_test.go` 已实现真实 V1 -> Server M -> V2 的完整入口，但当前可用材料不足以同时提供 BASE 与 incoming 两份真实备份，因此该测试必须继续 skip，不能用 synthetic fixture 冒充冻结验收。
+2. **Android/Termux 真机**：需要在目标 Android 上执行 `musicolet-agent -probe <path-or-uri>`，并最终跑一次真实浏览器播放，验证目标系统对 `/system/bin/content query/read` / MediaStore 的权限与媒体读取行为。GitHub runner 无法替代这一权限环境。
+
+除上述两项外，仓库内初期开发任务在本轮正式收口。后续若没有新的初期级别缺陷，应进入后期计划，而不是继续从代码审计中无限创造新的初期任务。
