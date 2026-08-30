@@ -25,7 +25,7 @@ func TestParsePlainJSONFixtures(t *testing.T) {
 	write := func(n, s string) { w, _ := z.Create(n); w.Write([]byte(s)) }
 	write("Mix.mpl", `{"S_P":["/a.mp3","/b.mp3","/a.mp3"]}`)
 	write("0.favs", `{"S_P":["/b.mp3"]}`)
-	write("0.qstk", `{"S0_PQ":[{"S0_PQ_T":"Q","S0_PQ_CPS":1,"S0_PQ_LKP":12000,"S0_PQ_OQS":{"S_P":["/a.mp3","/b.mp3"]}}]}`)
+	write("0.qstk", `{"S0_CPQ":1,"S0_PQ":[{"S0_PQ_T":"Q1","S0_PQ_CPS":0,"S0_PQ_LKP":1000,"S0_PQ_OQS":{"S_P":["/a.mp3"]}},{"S0_PQ_T":"Q2","S0_PQ_CPS":1,"S0_PQ_LKP":12000,"S0_PQ_OQS":{"S_P":["/a.mp3","/b.mp3"]}}]}`)
 	z.Close()
 	f.Close()
 	s, e := (Parser{}).ParseZip(context.Background(), p, dir)
@@ -38,8 +38,8 @@ func TestParsePlainJSONFixtures(t *testing.T) {
 	if !s.Favorites["/b.mp3"] {
 		t.Fatal("favorite missing")
 	}
-	if len(s.Queues) != 1 || s.Queues[0].CurrentIndex != 1 || s.Queues[0].PositionMS != 12000 {
-		t.Fatalf("queue %#v", s.Queues)
+	if len(s.Queues) != 2 || s.CurrentQueueIndex != 1 || s.Queues[1].CurrentIndex != 1 || s.Queues[1].PositionMS != 12000 {
+		t.Fatalf("queue/current %#v current=%d", s.Queues, s.CurrentQueueIndex)
 	}
 	if !bytes.Contains(CanonicalSnapshot(s), []byte(`"paths"`)) {
 		t.Fatal("canonical missing")
