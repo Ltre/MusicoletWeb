@@ -148,6 +148,15 @@ func readRange(source string, start, end int64, roots []string) (readResult, err
 	if end < start || end-start+1 > maxChunk {
 		end = start + maxChunk - 1
 	}
+	if strings.HasPrefix(source, "musicolet://media-store") {
+		for _, uri := range musicoletMediaStoreCandidates(source) {
+			r, err := readContentMedia(uri, start, end)
+			if err == nil {
+				return r, nil
+			}
+		}
+		return readResult{}, fmt.Errorf("unable to read Musicolet MediaStore URI")
+	}
 	if mediaURI.MatchString(source) {
 		return readContentMedia(source, start, end)
 	}
@@ -189,6 +198,53 @@ func readRange(source string, start, end int64, roots []string) (readResult, err
 	b = b[:n]
 	actualEnd := start + int64(n) - 1
 	return readResult{Data: b, Start: start, End: actualEnd, Size: sz}, nil
+}
+
+func musicoletMediaStoreCandidates(source string) []string {
+	u, err := url.Parse(source)
+	if err != nil || u.Scheme != "musicolet" || u.Host != "media-store" || u.Path != "" || u.User != nil || u.Fragment != "" {
+		return nil
+	}
+	q := u.Query()
+	allowed := map[string]bool{"p_v": true, "p_rp": true, "p_dn": true, "p_id": true, "p_mt": true}
+	for k, values := range q {
+		if !allowed[k] || len(values) != 1 {
+			return nil
+		}
+	}
+	id := q.Get("p_id")
+	if id == "" || !regexp.MustCompile(`^[0-9]+$`).MatchString(id) {
+		return nil
+	}
+	if mt := q.Get("p_mt"); mt != "" && mt != "1" {
+		return nil
+	}
+	volume := q.Get("p_v")
+	if volume == "" {
+		return nil
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(volume) {
+		return nil
+	}
+	volumes := []string{}
+	switch volume {
+	case "primary":
+		volumes = append(volumes, "external_primary", "external")
+	case "external":
+		volumes = append(volumes, "external")
+	case "internal":
+		volumes = append(volumes, "internal")
+	default:
+		volumes = append(volumes, volume)
+	}
+	out := make([]string, 0, len(volumes))
+	for _, v := range volumes {
+		candidate := "content://media/" + v + "/audio/media/" + id
+		if mediaURI.MatchString(candidate) {
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 func readContentMedia(uri string, start, end int64) (readResult, error) {
