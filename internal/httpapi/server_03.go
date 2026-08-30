@@ -16,7 +16,7 @@ import (
 )
 
 func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
-	if !agentOK(r, os.Getenv("MUSICOLET_AGENT_TOKEN")) {
+	if !s.agentOK(r) {
 		http.Error(w, "unauthorized", 401)
 		return
 	}
@@ -49,7 +49,7 @@ func (s *Server) agentConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
-	if !agentOK(r, os.Getenv("MUSICOLET_AGENT_TOKEN")) {
+	if !s.agentOK(r) {
 		http.Error(w, "unauthorized", 401)
 		return
 	}
@@ -71,9 +71,31 @@ func (s *Server) agentResult(w http.ResponseWriter, r *http.Request) {
 	writeOK(w)
 }
 
-func agentOK(r *http.Request, token string) bool {
+func (s *Server) agentOK(r *http.Request) bool {
+	token, err := s.Secure.Get(r.Context(), "agent_token")
+	if err != nil {
+		return false
+	}
 	got := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
+func (s *Server) agentTokenRotate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Token string `json:"token"`
+	}
+	if readJSON(w, r, &in) != nil {
+		return
+	}
+	if len(strings.TrimSpace(in.Token)) < 24 {
+		writeJSON(w, 400, map[string]string{"error": "token must be at least 24 characters"})
+		return
+	}
+	if err := s.Secure.Set(r.Context(), "agent_token", in.Token); err != nil {
+		fail(w, err)
+		return
+	}
+	writeOK(w)
 }
 
 type byteRange struct {
@@ -125,15 +147,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeOK(w http.ResponseWriter) { writeJSON(w, 200, map[string]bool{"ok": true}) }
-
 func fail(w http.ResponseWriter, e error) { writeJSON(w, 400, map[string]string{"error": e.Error()}) }
-
-func randomToken(n int) string {
-	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
+func randomToken(n int) string { b := make([]byte, n); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -143,5 +158,4 @@ func securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
 func FileExists(p string) bool { _, e := os.Stat(p); return e == nil }
