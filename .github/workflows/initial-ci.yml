@@ -23,8 +23,11 @@ jobs:
           go-version: '1.23.x'
           cache: false
 
-      - name: Download real Go dependencies
-        run: go mod download
+      - name: Resolve real Go dependencies
+        run: go mod tidy
+
+      - name: Ensure go.mod stays stable
+        run: git diff --exit-code -- go.mod
 
       - name: Unit tests
         run: go test ./...
