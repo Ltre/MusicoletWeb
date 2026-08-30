@@ -2,15 +2,18 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
+const mediaChunk = int64(4 << 20)
+
 func (s *Server) media(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	s.serveMedia(w, r, path)
+	s.serveMedia(w, r, r.URL.Query().Get("path"))
 }
 
 func (s *Server) publicNow(w http.ResponseWriter, r *http.Request) {
@@ -25,7 +28,6 @@ func (s *Server) publicNow(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
-
 func (s *Server) publicMedia(w http.ResponseWriter, r *http.Request) {
 	v, e := s.App.Playback(r.Context())
 	if e != nil || v.Path == "" {
@@ -40,22 +42,75 @@ func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request, path string)
 		http.Error(w, "path required", 400)
 		return
 	}
-	start, end := parseRange(r.Header.Get("Range"))
-	ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+	br, err := parseRange(r.Header.Get("Range"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
-	b, e := s.Hub.Request(ctx, path, start, end)
-	if e != nil {
-		http.Error(w, e.Error(), 503)
+	firstEnd := br.End
+	if firstEnd < 0 || firstEnd-br.Start+1 > mediaChunk {
+		firstEnd = br.Start + mediaChunk - 1
+	}
+	first, err := s.Hub.Request(ctx, path, br.Start, firstEnd)
+	if err != nil {
+		http.Error(w, err.Error(), 503)
+		return
+	}
+	if first.Size <= 0 || first.Start >= first.Size {
+		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	end := br.End
+	if end < 0 || end >= first.Size {
+		end = first.Size - 1
+	}
+	if end < br.Start {
+		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
 	ct := mime.TypeByExtension(filepath.Ext(path))
 	if ct == "" {
-		ct = http.DetectContentType(b)
+		ct = http.DetectContentType(first.Data)
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Accept-Ranges", "bytes")
-	if start > 0 || end >= 0 {
+	length := end - br.Start + 1
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+	if br.Requested {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", br.Start, end, first.Size))
 		w.WriteHeader(http.StatusPartialContent)
 	}
-	_, _ = w.Write(b)
+	if r.Method == http.MethodHead {
+		return
+	}
+	writeChunk := func(b []byte) bool {
+		_, e := w.Write(b)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		return e == nil
+	}
+	if !writeChunk(first.Data) {
+		return
+	}
+	next := first.End + 1
+	for next <= end {
+		chunkEnd := next + mediaChunk - 1
+		if chunkEnd > end {
+			chunkEnd = end
+		}
+		rr, e := s.Hub.Request(ctx, path, next, chunkEnd)
+		if e != nil {
+			return
+		}
+		if rr.Start != next || rr.Size != first.Size || rr.End < rr.Start {
+			return
+		}
+		if !writeChunk(rr.Data) {
+			return
+		}
+		next = rr.End + 1
+	}
 }
