@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/Ltre/MusicoletWeb/internal/agenthub"
 )
 
 const mediaChunk = int64(4 << 20)
@@ -28,6 +30,7 @@ func (s *Server) publicNow(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, out)
 }
+
 func (s *Server) publicMedia(w http.ResponseWriter, r *http.Request) {
 	v, e := s.App.Playback(r.Context())
 	if e != nil || v.Path == "" {
@@ -35,6 +38,16 @@ func (s *Server) publicMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveMedia(w, r, v.Path)
+}
+
+func validAgentChunk(r agenthub.Result, wantStart, maxEnd, wantSize int64) bool {
+	if r.Size <= 0 || r.Start != wantStart || r.End < r.Start || r.End > maxEnd || r.End >= r.Size {
+		return false
+	}
+	if wantSize > 0 && r.Size != wantSize {
+		return false
+	}
+	return int64(len(r.Data)) == r.End-r.Start+1
 }
 
 func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request, path string) {
@@ -58,8 +71,12 @@ func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request, path string)
 		http.Error(w, err.Error(), 503)
 		return
 	}
-	if first.Size <= 0 || first.Start >= first.Size {
+	if first.Size <= 0 || br.Start >= first.Size {
 		http.Error(w, "range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+	if !validAgentChunk(first, br.Start, firstEnd, 0) {
+		http.Error(w, "invalid Agent media chunk", http.StatusBadGateway)
 		return
 	}
 	end := br.End
@@ -105,7 +122,7 @@ func (s *Server) serveMedia(w http.ResponseWriter, r *http.Request, path string)
 		if e != nil {
 			return
 		}
-		if rr.Start != next || rr.Size != first.Size || rr.End < rr.Start {
+		if !validAgentChunk(rr, next, chunkEnd, first.Size) {
 			return
 		}
 		if !writeChunk(rr.Data) {
