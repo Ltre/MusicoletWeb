@@ -1,5 +1,6 @@
 name: Initial Development CI
 
+# The committed go.mod/go.sum must remain tidy and reproducible on the real toolchain.
 on:
   push:
     branches:
