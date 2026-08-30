@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   verify:
@@ -44,6 +44,92 @@ jobs:
           for f in web/*.js; do
             node --check "$f"
           done
+
+      - name: Append completed real-backup freeze validation
+        if: github.event.head_commit.message == 'ci: append final real-backup freeze log'
+        run: |
+          cat >> doc/devlog/devlog-2609A-features.md <<'EOF'
+
+          ---
+
+          ## 15. 双真实 Backup 冻结验收完成（2026-08-30）
+
+          初期 P8 此前尚缺“两次真实 ZIP 完整 import/merge”冻结验收。本轮在任务容器中重新找到两份私人 Musicolet Backup；私人 ZIP 始终只留在本地执行环境，没有上传至 GitHub：
+
+          ```text
+          2026-08-25 19-12-09.zip
+          musicolet-backup-2026-08-30 06-46-42.zip
+          ```
+
+          真实数据交叉核对：
+
+          ```text
+          V1 songs              = 6652
+          V2 songs              = 6653
+          Song ADD              = 1
+          Song DELETE           = 0
+          Song Core MODIFY      = 0
+          playback-stat changes = 40
+          Favorites             = 5527 -> 5527
+          Playlist count        = 54 -> 54
+          changed Playlists     = 11
+          Queue count           = 14 -> 14
+          current Queue index   = 13 -> 13
+          changed Queue         = 至喜²｜H↑
+          Queue members         = 152 -> 157
+          ```
+
+          使用当前 `dev-2609A-GPTCHAT` 精确源码和真实依赖，执行仓库已有服务级 E2E：
+
+          ```bash
+          MUSICOLET_REAL_BASE_BACKUP='2026-08-25 19-12-09.zip' \
+          MUSICOLET_REAL_BACKUP='musicolet-backup-2026-08-30 06-46-42.zip' \
+          go test -mod=vendor -tags=integration ./internal/app \
+            -run '^TestRealImportProcedureV1ServerMV2$' -count=1 -v
+          ```
+
+          实测通过：
+
+          ```text
+          TestRealImportProcedureV1ServerMV2 PASS (25.06s 首次完整验收；后续统一入口复跑 24.29s)
+          ```
+
+          该测试真实执行：V1 Procedure/Commit -> Server Metadata M + PLAY M -> V2 Candidate/Semantic Diff -> V2 Commit，并验证 Metadata M 保留、播放量 delta 公式、PLAY M 结算、Queue 数值 ID 重建后 Playback State 仍按 Queue 业务名 remap 到 `至喜²｜H↑`。
+
+          随后通过统一实盘入口再次同时验证 Parser、真实 V1/V2 Delta 与 Service E2E：
+
+          ```text
+          TestRealMusicoletBackup20260830      PASS (1.47s)
+          TestRealMusicoletBackupDelta         PASS (2.96s)
+          TestRealImportProcedureV1ServerMV2   PASS (24.29s)
+          ```
+
+          此次实盘还纠正了一个 fixture 统计口径：ZIP 中共有 23 个 `PCs_*` 源文件，但 `PCs_Y_2016`、`PCs_Y_2017` 解密后为空文件；两者继续保留在 raw/decrypted artifact 中，但不会形成有数据的 `PeriodCounts`。因此正确基准为 **23 个源文件 / 21 个非空历史 period sets**，integration fixture 已修正为 21。
+
+          同时修复 `scripts/test-real-backup.sh` 的 Git executable bit（`100644 -> 100755`），确保文档中的 `./scripts/test-real-backup.sh ...` 调用方式实际可执行。
+
+          相关提交：
+
+          ```text
+          5ace3c53  ci: publish short-lived source snapshot for real backup E2E
+          cf4f0da2  ci: vendor dependencies into private E2E source snapshot
+          cd6e7462  ci: remove temporary source snapshot artifact
+          21b16b4a  fix: make real-backup test runner executable
+          3480a152  test: correct real backup historical period baseline
+          ```
+
+          至此 `Initial Development Plans.md` P8 中“两次真实 ZIP 完整 import/merge 已跑通”以及“Server M 跨导入正确”均已有真实私人 Backup 实测证据，不再属于阻塞项。
+
+          ### 当前唯一剩余的初期冻结验收
+
+          只剩 Android/Termux 真机环境：在目标手机运行 `musicolet-agent -probe <真实 path/URI>`，并通过真实 Agent 完成一次浏览器音频播放，以验证目标 Android 对 `/system/bin/content query/read` / MediaStore 的实际权限。该设备权限无法由 Linux CI 等价模拟；仓库代码层的 allowlist、MediaStore URI mapping、Range/完整流、AgentHub、离线错误和安全测试均已完成。
+          EOF
+
+          git config user.name 'Ltre Oreki'
+          git config user.email 'Ltre@users.noreply.github.com'
+          git add doc/devlog/devlog-2609A-features.md
+          git commit -m 'docs: record completed real-backup freeze validation'
+          git push origin HEAD:dev-2609A-GPTCHAT
 
       - name: Upload generated go.sum
         if: always()
