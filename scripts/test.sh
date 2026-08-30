@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 go test ./...
 go vet ./...
-go test -tags=integration ./internal/db ./internal/musicolet ./internal/app
+go test -tags=integration ./internal/db ./internal/musicolet ./internal/app ./internal/httpapi
 for f in web/*.js; do node --check "$f"; done
 bash -n scripts/linux-alyhk.start.sh
 bash -n scripts/build-agent-arm64.sh
