@@ -3,8 +3,20 @@ package httpapi
 import (
 	"crypto/subtle"
 	"net/http"
+	"strings"
 	"time"
 )
+
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	// The production deployment terminates TLS before the Go process and
+	// forwards the original scheme. Use only the first value, which represents
+	// the client-facing hop in the configured proxy chain.
+	proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(proto, "https")
+}
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var in struct{ Username, Password, TOTP string }
@@ -17,14 +29,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := s.Auth.Issue(time.Now())
 	csrf := randomToken(24)
-	http.SetCookie(w, &http.Cookie{Name: "mw_session", Value: tok, Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
-	http.SetCookie(w, &http.Cookie{Name: "mw_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
+	secure := requestIsSecure(r)
+	http.SetCookie(w, &http.Cookie{Name: "mw_session", Value: tok, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
+	http.SetCookie(w, &http.Cookie{Name: "mw_csrf", Value: csrf, Path: "/", HttpOnly: false, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
 	writeJSON(w, 200, map[string]any{"ok": true, "csrf": csrf})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: "mw_session", Path: "/", MaxAge: -1, HttpOnly: true})
-	http.SetCookie(w, &http.Cookie{Name: "mw_csrf", Path: "/", MaxAge: -1})
+	secure := requestIsSecure(r)
+	http.SetCookie(w, &http.Cookie{Name: "mw_session", Path: "/", MaxAge: -1, HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: "mw_csrf", Path: "/", MaxAge: -1, Secure: secure, SameSite: http.SameSiteStrictMode})
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -34,8 +48,8 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, e := r.Cookie("mw_session")
-		if e != nil || s.Auth.VerifySession(c.Value, time.Now()) != nil {
+		c, err := r.Cookie("mw_session")
+		if err != nil || s.Auth.VerifySession(c.Value, time.Now()) != nil {
 			writeJSON(w, 401, map[string]string{"error": "auth required"})
 			return
 		}
@@ -45,9 +59,9 @@ func (s *Server) protect(next http.Handler) http.Handler {
 
 func (s *Server) protectWrite(next http.Handler) http.Handler {
 	return s.protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, e := r.Cookie("mw_csrf")
+		c, err := r.Cookie("mw_csrf")
 		h := r.Header.Get("X-CSRF-Token")
-		if e != nil || h == "" || subtle.ConstantTimeCompare([]byte(c.Value), []byte(h)) != 1 {
+		if err != nil || h == "" || subtle.ConstantTimeCompare([]byte(c.Value), []byte(h)) != 1 {
 			writeJSON(w, 403, map[string]string{"error": "csrf"})
 			return
 		}
