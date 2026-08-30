@@ -794,3 +794,52 @@ run #40 / 5ce57dab  success
 2. **Android/Termux 真机**：需要在目标 Android 上执行 `musicolet-agent -probe <path-or-uri>`，并最终跑一次真实浏览器播放，验证目标系统对 `/system/bin/content query/read` / MediaStore 的权限与媒体读取行为。GitHub runner 无法替代这一权限环境。
 
 除上述两项外，仓库内初期开发任务在本轮正式收口。后续若没有新的初期级别缺陷，应进入后期计划，而不是继续从代码审计中无限创造新的初期任务。
+
+---
+
+## 15. 双真实 Backup 冻结验收完成（2026-08-30）
+
+此前 P8 冻结条件尚缺“两次真实 ZIP 完整 import/merge”。本轮在任务容器中确认两份私人 Backup 均可用，且私人 ZIP 始终只留在本地执行环境，没有上传 GitHub：
+
+```text
+2026-08-25 19-12-09.zip
+musicolet-backup-2026-08-30 06-46-42.zip
+```
+
+真实数据交叉核对：V1=6652 songs，V2=6653 songs；Song ADD=1、DELETE=0、Song Core MODIFY=0、playback-stat changes=40；Favorites 5527→5527；Playlist 54→54、11 个 Playlist 发生变化；Queue 14→14、current queue index 13→13，变化 Queue 为 `至喜²｜H↑`，成员 152→157。
+
+使用当前 `dev-2609A-GPTCHAT` 精确源码和真实依赖运行现有完整服务级 E2E：
+
+```text
+TestRealImportProcedureV1ServerMV2 PASS (25.06s；统一入口复跑 24.29s)
+```
+
+该测试真实执行 V1 Procedure/Commit → Server Metadata M + PLAY M → V2 Candidate/Semantic Diff → V2 Commit，并验证 Metadata M 保留、播放量 delta 公式、PLAY M 结算、Queue 数值 ID 重建后 Playback State 仍按 Queue 业务名 remap 到 `至喜²｜H↑`。
+
+随后通过 `scripts/test-real-backup.sh` 统一实盘入口再次同时验证：
+
+```text
+TestRealMusicoletBackup20260830      PASS (1.47s)
+TestRealMusicoletBackupDelta         PASS (2.96s)
+TestRealImportProcedureV1ServerMV2   PASS (24.29s)
+```
+
+实盘同旵纠正了历史 period fixture 口径：ZIP 中共有 23 个 `PCs_*` 源文件，但 `PCs_Y_2016`、`PCs_Y_2017` 解密后为空文件；两者继续保留在 raw/decrypted artifact，但不会形成有数据的 `PeriodCounts`，因此正确语义为 **23 个源文件 / 21 个非空历史 period sets**。integration fixture 已修正为 21。
+
+还修复了 `scripts/test-real-backup.sh` 的 Git executable bit（`100644 → 100755`），保证文档中的直接执行方式实际可用。
+
+相关提交：
+
+```text
+5ace3c53  ci: publish short-lived source snapshot for real backup E2E
+cf4f0da2  ci: vendor dependencies into private E2E source snapshot
+cd6e7462  ci: remove temporary source snapshot artifact
+21b16b4a  fix: make real-backup test runner executable
+3480a152  test: correct real backup historical period baseline
+```
+
+至此 `Initial Development Plans.md` P8 中“两次真实 ZIP 完整 import/merge 已跑通”和“Server M 跨导入正确”均有真实私人 Backup 实测证据，不再属于阻塞项。
+
+### 当前唯一剩余的初期冻结验收
+
+只剩 Android/Termux 真机环境：在目标手机运行 `musicolet-agent -probe <真实 path/URI>`，并通过真实 Agent 完成一次浏览器音频播放，以验证目标 Android 对 `/system/bin/content query/read` / MediaStore 的实际权限。该设备权限无法由 Linux CI 等价模拟；仓库代码层的 allowlist、MediaStore URI mapping、Range/完整流、AgentHub、离线错误和安全测试均已完成。
