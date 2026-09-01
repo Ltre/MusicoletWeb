@@ -30,3 +30,11 @@ go.work.sum
 .vscode/
 .DS_Store
 Thumbs.db
+
+data/*
+
+# Backup of MusicoletWeb data (codex vibe coding)
+data-of-CODEX-CODING/*
+
+# Backup of MusicoletWeb data (gptchat vibe coding)
+data-of-GPTCHAT-CODING/*
