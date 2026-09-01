@@ -27,6 +27,19 @@ go.work.sum
 # env file
 .env
 
+# MusicoletWeb runtime facts, archives, caches and local build outputs
+data/*
+!data/.gitkeep
+.codex-go-cache/
+.codex-build/
+.codex-e2e/
+
+# Backup of MusicoletWeb data (codex vibe coding)
+data-of-CODEX-CODING/*
+
+# Backup of MusicoletWeb data (gptchat vibe coding)
+data-of-GPTCHAT-CODING/*
+
 # Editor/IDE
 # .idea/
 # .vscode/

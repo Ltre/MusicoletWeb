@@ -1,0 +1,39 @@
+.public-now .tabs,
+.public-now .status,
+.public-now .mini-player {
+  display: none;
+}
+
+.public-now .topbar {
+  position: static;
+}
+
+.public-now .app {
+  padding-bottom: 0;
+}
+
+.public-now .hero-cover {
+  cursor: default;
+}
+
+.queue-manage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px 44px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+}
+
+.queue-manage-row .pick-queue {
+  min-width: 0;
+  padding: 12px;
+  text-align: left;
+}
+
+.queue-manage-row .move-queue {
+  font-size: 20px;
+}
+
+.queue-manage-row .move-queue:disabled {
+  cursor: default;
+  opacity: .3;
+}
