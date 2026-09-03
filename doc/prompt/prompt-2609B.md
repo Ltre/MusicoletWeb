@@ -3,7 +3,7 @@
 问：
 
 
-	1、考虑调用Drop2Tunnel的telegram网盘API，来保存歌曲文件，而且要以歌曲文件的原手机存储文件路径来创建在telegram网盘中的虚拟目录。
+	1、考虑调用Drop2Tunnel的telegram网盘API[telegram-disk-api.md]，来保存歌曲文件，而且要以歌曲文件的原手机存储文件路径来创建在telegram网盘中的虚拟目录。
 	
 	2、备份telegram音乐频道ThXXXXe所有内容并联通同步机制，确保telegram新增/修改数据可以同步过来web系统，对于删除的则要确认
 	
