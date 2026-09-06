@@ -180,3 +180,4 @@ GET http://localhost:4001/healthz
 ```
 
 更完整的架构、数据规则和运行说明见 `doc/tech/tech-master.md`；本轮实现与验证记录见 `doc/devlog/devlog-2609A-features.md`。
+
