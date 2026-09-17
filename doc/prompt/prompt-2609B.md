@@ -1,6 +1,6 @@
 	
 	
-问：
+【还没做】问：
 
 
 	1、考虑调用Drop2Tunnel的telegram网盘API[telegram-disk-api.md]，来保存歌曲文件，而且要以歌曲文件的原手机存储文件路径来创建在telegram网盘中的虚拟目录。
